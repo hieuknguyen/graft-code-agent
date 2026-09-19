@@ -1,6 +1,8 @@
 """Exercise the desktop's rearranged surfaces without contacting an AI API."""
 
 import os
+import time
+from threading import Event
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -8,12 +10,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QThread, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from config import AppConfig
+from core.agent import GraftAgent
 from core.session_manager import SessionManager
 from desktop.main_window import MainWindow
 from desktop.views.prompt_widget import PromptWidget
@@ -150,6 +153,7 @@ def test_switch_workspace_resets_code_and_preserves_conversations(window, tmp_pa
     window.editor.chat_view.add_user_message("Explain this project")
     original_conv = window.current_conv_id
     window.on_file_selected("src/example.py")
+    window.sidebar.file_search.setText("example")
     other = tmp_path / "other"
     other.mkdir()
     with patch.object(window, "do_scan"):
@@ -157,5 +161,89 @@ def test_switch_workspace_resets_code_and_preserves_conversations(window, tmp_pa
     assert window.editor.current_file is None
     assert window.editor.pages.currentIndex() == 0
     assert "other" in window.workspace_button.text()
+    assert window.sidebar.tree.topLevelItemCount() == 0
+    assert window.sidebar.file_search.text() == ""
+    assert window.prompt.target_file_combo.count() == 1
+    assert window.prompt.target_file_combo.currentData() == ""
     saved = window.session_mgr.get_conversation(original_project, original_conv)
     assert saved["messages"][0]["text"] == "Explain this project"
+
+
+def wait_until(app, condition):
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if condition():
+            return
+        time.sleep(0.01)
+    assert condition(), "Timed out waiting for the desktop scan"
+
+
+@pytest.mark.parametrize("old_scan_fails", [False, True])
+def test_switch_during_scan_loads_latest_project(window, app, tmp_path, old_scan_fails):
+    old_agent = window.agent
+    old_started, old_release = Event(), Event()
+    new_started, new_release = Event(), Event()
+    intermediate = tmp_path / "intermediate"
+    intermediate.mkdir()
+    latest = tmp_path / "latest"
+    latest.mkdir()
+    (latest / "route.php").write_text("<?php\nfunction endpoint() {}\n", encoding="utf-8")
+    scanned_roots, rendered_roots = [], []
+    real_scan = GraftAgent.scan
+    real_render = window.on_scan_finished
+
+    def scan(agent):
+        scanned_roots.append(agent.root_dir)
+        if agent is old_agent:
+            old_started.set()
+            assert old_release.wait(5)
+            if old_scan_fails:
+                raise RuntimeError("Old project is no longer available")
+        elif agent.root_dir == latest:
+            new_started.set()
+            assert new_release.wait(5)
+        real_scan(agent)
+
+    def render(stats, welcome=False):
+        assert QThread.currentThread() == app.thread()
+        rendered_roots.append(window.agent.root_dir)
+        real_render(stats, welcome=welcome)
+
+    with patch.object(GraftAgent, "scan", autospec=True, side_effect=scan), \
+         patch.object(window, "on_scan_finished", side_effect=render), \
+         patch("desktop.main_window.QMessageBox.warning") as warning:
+        try:
+            window.do_scan()
+            assert old_started.wait(1)
+            window.sidebar.project_switched.emit(str(intermediate))
+            window.sidebar.project_switched.emit(str(latest))
+            assert window.sidebar.tree.topLevelItemCount() == 0
+            assert window.prompt.target_file_combo.count() == 1
+
+            old_release.set()
+            wait_until(app, new_started.is_set)
+            assert rendered_roots == []
+            warning.assert_not_called()
+
+            new_release.set()
+            wait_until(app, lambda: window.sidebar.tree.topLevelItemCount() == 1)
+            assert rendered_roots == [latest]
+            assert scanned_roots == [old_agent.root_dir, latest]
+            item = window.sidebar.tree.topLevelItem(0)
+            assert item.text(0) == "route.php"
+            assert not item.isHidden()
+            assert window.sidebar.lbl_stats.text() == "1 tệp · 1 symbols"
+            assert window.prompt.target_file_combo.itemData(1) == "route.php"
+            window.sidebar.tree.itemClicked.emit(item, 0)
+            assert window.editor.current_file == "route.php"
+            assert "function endpoint" in window.editor.code_editor.toPlainText()
+            warning.assert_not_called()
+        finally:
+            old_release.set()
+            new_release.set()
+            for _ in range(3):
+                worker = getattr(window, "scan_worker", None)
+                if worker is not None:
+                    worker.wait(2000)
+                app.processEvents()

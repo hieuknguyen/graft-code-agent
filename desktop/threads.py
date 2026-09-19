@@ -3,23 +3,23 @@ from PySide6.QtCore import QThread, Signal
 from core.agent import GraftAgent
 
 class ScanWorker(QThread):
-    finished = Signal(dict)
-    error = Signal(str)
-
-    def __init__(self, agent: GraftAgent):
+    def __init__(self, agent: GraftAgent, welcome: bool = False):
         super().__init__()
         self.agent = agent
+        self.welcome = welcome
+        self.stats = None
+        self.error_message = None
 
     def run(self):
         try:
             self.agent.scan()
             symbols_count = sum(len(f.symbols) for f in self.agent.graph.files.values())
-            self.finished.emit({
+            self.stats = {
                 "files_count": len(self.agent.graph.files),
                 "symbols_count": symbols_count
-            })
+            }
         except Exception as e:
-            self.error.emit(str(e))
+            self.error_message = str(e)
 
 class GraftWorker(QThread):
     finished = Signal(dict)

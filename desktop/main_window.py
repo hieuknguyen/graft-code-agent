@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QStatusBar, QFileDialog, QMenuBar, QMenu,
     QLabel, QPushButton, QFrame, QButtonGroup
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QAction
 
 from config import load_config, save_config, AppConfig
@@ -35,6 +35,8 @@ class MainWindow(QMainWindow):
         self.current_project = self.session_mgr.get_or_create_project(self.root_dir)
         self.current_conv_id: Optional[str] = None
         self.agent = GraftAgent(self.config, self.root_dir)
+        self.scan_worker = None
+        self._pending_scan_welcome = None
         self.last_actions = []
         self.pending_creates = []
         self.feedback_loop_active = False
@@ -328,6 +330,11 @@ class MainWindow(QMainWindow):
         self.current_project = self.session_mgr.get_or_create_project(self.root_dir)
         self.agent = GraftAgent(self.config, self.root_dir)
         self.sidebar.agent = self.agent
+        self.sidebar.tree.clear()
+        self.sidebar.file_search.clear()
+        self.sidebar.lbl_stats.setText("Đang quét dự án…")
+        self.prompt.update_file_list([])
+        self.prompt.btn_undo.setEnabled(False)
         self.update_workspace_header()
         self.editor.current_file = None
         self.editor.code_editor.clear()
@@ -360,13 +367,34 @@ class MainWindow(QMainWindow):
             pass
 
     def do_scan(self, welcome: bool = False):
-        if hasattr(self, "scan_worker") and self.scan_worker and self.scan_worker.isRunning():
+        if self.scan_worker is not None:
+            if self.scan_worker.agent is not self.agent:
+                self._pending_scan_welcome = welcome
+                self.status.showMessage("Đang chờ lượt quét trước kết thúc để quét dự án mới…")
             return
         self.status.showMessage("Đang quét AST biểu tượng & đồ thị codebase...")
-        self.scan_worker = ScanWorker(self.agent)
-        self.scan_worker.finished.connect(lambda stats: self.on_scan_finished(stats, welcome=welcome))
-        self.scan_worker.error.connect(self.on_scan_error)
+        self.scan_worker = ScanWorker(self.agent, welcome=welcome)
+        self.scan_worker.finished.connect(self.on_scan_completed)
         self.scan_worker.start()
+
+    @Slot()
+    def on_scan_completed(self):
+        worker = self.sender()
+        if worker is not self.scan_worker:
+            return
+        self.scan_worker = None
+        # The native QThread signal runs this slot on the UI thread after scanning stops.
+        # A result from an earlier workspace must never update the current explorer.
+        if worker.agent is self.agent:
+            if worker.error_message is not None:
+                self.on_scan_error(worker.error_message)
+            else:
+                self.on_scan_finished(worker.stats, welcome=worker.welcome)
+        worker.deleteLater()
+        if self._pending_scan_welcome is not None:
+            welcome = self._pending_scan_welcome
+            self._pending_scan_welcome = None
+            self.do_scan(welcome=welcome)
 
     def on_scan_finished(self, stats: dict, welcome: bool = False):
         self.sidebar.update_tree()
@@ -388,6 +416,7 @@ class MainWindow(QMainWindow):
             )
 
     def on_scan_error(self, err: str):
+        self.sidebar.lbl_stats.setText("Quét dự án thất bại")
         self.status.showMessage(f"Lỗi quét AST: {err}")
         QMessageBox.warning(self, "Lỗi quét Codebase", err)
 
