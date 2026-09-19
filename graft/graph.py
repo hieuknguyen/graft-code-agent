@@ -12,7 +12,8 @@ class CodebaseGraph:
         self.files: Dict[str, FileAST] = {}
         self.symbol_index: Dict[str, List[Dict[str, Any]]] = {}
 
-    def scan(self, max_files: int = 200):
+    def scan(self, max_files: Optional[int] = None):
+        """Quét mọi tệp được hỗ trợ, trừ khi bên gọi đặt giới hạn cụ thể."""
         self.files.clear()
         self.symbol_index.clear()
 
@@ -45,11 +46,11 @@ class CodebaseGraph:
                             })
 
                         count += 1
-                        if count >= max_files:
+                        if max_files is not None and count >= max_files:
                             break
                     except Exception as e:
                         pass
-            if count >= max_files:
+            if max_files is not None and count >= max_files:
                 break
 
     def find_symbol(self, name: str) -> List[dict]:
