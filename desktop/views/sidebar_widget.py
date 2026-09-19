@@ -5,10 +5,12 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QTreeWidget, QTreeWidgetItem, QFileDialog, QComboBox,
     QTabWidget, QListWidget, QListWidgetItem, QInputDialog, QMessageBox,
-    QMenu
+    QMenu, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal, QPoint
 from PySide6.QtGui import QIcon, QFont, QAction, QColor
+
+from desktop.icons import icon
 
 from core.agent import GraftAgent
 from core.session_manager import SessionManager
@@ -33,175 +35,92 @@ class SidebarWidget(QWidget):
         self.init_ui()
 
     def init_ui(self):
+        self.setObjectName("sidebar")
+        self.setMinimumWidth(210)
+        self.setMaximumWidth(420)
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(6, 6, 6, 6)
-        main_layout.setSpacing(6)
-
-        # 1. HEADER: Project Selection
-        header_box = QVBoxLayout()
-        header_box.setSpacing(4)
-
+        main_layout.setContentsMargins(10, 9, 10, 8)
+        main_layout.setSpacing(10)
         title_row = QHBoxLayout()
-        title_icon = QLabel("🏢")
-        title_icon.setStyleSheet("font-size: 15px;")
-        title_row.addWidget(title_icon)
-
-        title_lbl = QLabel("QUẢN LÝ PROJECT & CHAT")
-        title_lbl.setStyleSheet("font-weight: bold; color: #818cf8; font-size: 11px; letter-spacing: 0.5px;")
-        title_row.addWidget(title_lbl)
+        title = QLabel("WORKSPACE")
+        title.setObjectName("sectionLabel")
+        title_row.addWidget(title)
         title_row.addStretch()
-
-        self.btn_rescan = QPushButton("🔄")
-        self.btn_rescan.setToolTip("Quét lại cấu trúc AST codebase")
-        self.btn_rescan.setFixedWidth(28)
-        self.btn_rescan.clicked.connect(self.rescan_requested.emit)
-        title_row.addWidget(self.btn_rescan)
-
-        self.btn_doctor = QPushButton("🩺")
-        self.btn_doctor.setToolTip("Chẩn đoán môi trường & thư viện (Doctor)")
-        self.btn_doctor.setFixedWidth(28)
-        self.btn_doctor.clicked.connect(self.doctor_requested.emit)
-        title_row.addWidget(self.btn_doctor)
-        header_box.addLayout(title_row)
-
-        # Project Selector Combobox
+        for attr, name, tooltip, signal in (
+            ("btn_rescan", "refresh", "Quét lại codebase (F5)", self.rescan_requested),
+            ("btn_doctor", "activity", "Kiểm tra môi trường (F6)", self.doctor_requested),
+        ):
+            button = QPushButton(icon(name), "")
+            button.setObjectName("iconButton")
+            button.setFixedSize(26, 26)
+            button.setToolTip(tooltip)
+            button.setAccessibleName(tooltip)
+            button.clicked.connect(signal.emit)
+            setattr(self, attr, button)
+            title_row.addWidget(button)
+        main_layout.addLayout(title_row)
         self.project_combo = QComboBox()
+        self.project_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.project_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.project_combo.setMinimumContentsLength(10)
         self.project_combo.setToolTip("Chọn dự án làm việc")
         self.project_combo.currentIndexChanged.connect(self.on_project_combo_changed)
-        header_box.addWidget(self.project_combo)
-
-        # Buttons: Import Project
-        proj_btn_row = QHBoxLayout()
-        self.btn_import = QPushButton("📂 Import Project Mới...")
-        self.btn_import.setObjectName("primaryButton")
-        self.btn_import.setStyleSheet("padding: 6px 10px; font-weight: bold; font-size: 11px;")
+        main_layout.addWidget(self.project_combo)
+        self.btn_import = QPushButton(icon("folder"), "Mở thư mục…")
+        self.btn_import.setToolTip("Mở dự án từ máy tính (Ctrl+O)")
         self.btn_import.clicked.connect(self.browse_folder)
-        proj_btn_row.addWidget(self.btn_import)
+        main_layout.addWidget(self.btn_import)
 
-        self.btn_doc_quick = QPushButton("🩺 Doctor")
-        self.btn_doc_quick.setStyleSheet("padding: 6px 10px; font-weight: bold; font-size: 11px; background-color: #0f766e; color: #ccfbf1; border: 1px solid #14b8a6;")
-        self.btn_doc_quick.clicked.connect(self.doctor_requested.emit)
-        proj_btn_row.addWidget(self.btn_doc_quick)
-        header_box.addLayout(proj_btn_row)
-
-        main_layout.addLayout(header_box)
-
-        # 2. TABS: Tab 1 (Conversations - MẶC ĐỊNH), Tab 2 (Files & AST)
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane { border: 1px solid #1e293b; background: #070a13; border-radius: 6px; }
-            QTabBar::tab { background: #0f172a; color: #94a3b8; padding: 6px 10px; border-top-left-radius: 4px; border-top-right-radius: 4px; font-weight: bold; font-size: 11px; }
-            QTabBar::tab:selected { background: #1e293b; color: #38bdf8; border-bottom: 2px solid #38bdf8; }
-        """)
-
-        # --- TAB 1: CONVERSATIONS ---
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().setDrawBase(False)
         tab_convs = QWidget()
         conv_layout = QVBoxLayout(tab_convs)
-        conv_layout.setContentsMargins(4, 6, 4, 4)
-        conv_layout.setSpacing(6)
-
-        # Button: New Conversation
-        self.btn_new_chat = QPushButton("➕ Cuộc Trò Chuyện Mới")
-        self.btn_new_chat.setStyleSheet("""
-            QPushButton {
-                background-color: #4f46e5;
-                color: #ffffff;
-                font-weight: bold;
-                font-size: 12px;
-                padding: 8px 12px;
-                border-radius: 6px;
-                border: 1px solid #6366f1;
-            }
-            QPushButton:hover {
-                background-color: #4338ca;
-            }
-        """)
+        conv_layout.setContentsMargins(0, 10, 0, 0)
+        conv_layout.setSpacing(8)
+        self.btn_new_chat = QPushButton(icon("plus"), "Cuộc trò chuyện mới")
         self.btn_new_chat.clicked.connect(self.new_conversation_requested.emit)
         conv_layout.addWidget(self.btn_new_chat)
-
-        # Search Conversations
         self.conv_search = QLineEdit()
-        self.conv_search.setPlaceholderText("🔍 Tìm cuộc trò chuyện...")
-        self.conv_search.setStyleSheet("padding: 4px 8px; font-size: 11px;")
+        self.conv_search.setObjectName("sidebarSearch")
+        self.conv_search.setPlaceholderText("Tìm cuộc trò chuyện…")
         self.conv_search.textChanged.connect(self.filter_conversations)
         conv_layout.addWidget(self.conv_search)
-
-        # Conversations List
         self.conv_list = QListWidget()
-        self.conv_list.setStyleSheet("""
-            QListWidget {
-                background-color: #050811;
-                border: 1px solid #1e293b;
-                border-radius: 6px;
-                padding: 4px;
-            }
-            QListWidget::item {
-                background-color: #0d1322;
-                border: 1px solid #1e293b;
-                border-radius: 6px;
-                padding: 8px 10px;
-                margin-bottom: 4px;
-                color: #e2e8f0;
-            }
-            QListWidget::item:hover {
-                background-color: #1e1b4b;
-                border: 1px solid #4338ca;
-            }
-            QListWidget::item:selected {
-                background-color: #1e1b4b;
-                border: 1px solid #6366f1;
-                color: #ffffff;
-            }
-        """)
+        self.conv_list.setWordWrap(True)
         self.conv_list.itemClicked.connect(self.on_conv_item_clicked)
         self.conv_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.conv_list.customContextMenuRequested.connect(self.show_conv_context_menu)
         conv_layout.addWidget(self.conv_list)
-
-        # Storage indicator label
-        self.lbl_storage_info = QLabel("🔒 100% Cục bộ trên máy tính (Local Disk)")
-        self.lbl_storage_info.setStyleSheet("color: #64748b; font-size: 10px; padding: 2px;")
-        self.lbl_storage_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_storage_info = QLabel("Lịch sử được lưu trên máy")
+        self.lbl_storage_info.setObjectName("muted")
         conv_layout.addWidget(self.lbl_storage_info)
+        self.tabs.addTab(tab_convs, "Lịch sử")
 
-        self.tabs.addTab(tab_convs, "💬 Hội Thoại")
-
-        # --- TAB 2: FILES & AST SYMBOLS ---
         tab_files = QWidget()
         files_layout = QVBoxLayout(tab_files)
-        files_layout.setContentsMargins(4, 6, 4, 4)
-        files_layout.setSpacing(6)
-
+        files_layout.setContentsMargins(0, 10, 0, 0)
+        files_layout.setSpacing(8)
         self.file_search = QLineEdit()
-        self.file_search.setPlaceholderText("🔍 Lọc hàm, class, tệp...")
-        self.file_search.setStyleSheet("padding: 4px 8px; font-size: 11px;")
+        self.file_search.setObjectName("sidebarSearch")
+        self.file_search.setPlaceholderText("Tìm tệp, hàm, class…")
         self.file_search.textChanged.connect(self.filter_tree)
         files_layout.addWidget(self.file_search)
-
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Tên File / Biểu tượng AST", "Dòng"])
-        self.tree.setColumnWidth(0, 190)
-        self.tree.setStyleSheet("""
-            QTreeWidget {
-                background-color: #050811;
-                border: 1px solid #1e293b;
-                border-radius: 6px;
-            }
-        """)
+        self.tree.setHeaderHidden(True)
+        self.tree.setColumnCount(2)
+        self.tree.setColumnHidden(1, True)
+        self.tree.setIndentation(14)
+        self.tree.setUniformRowHeights(True)
         self.tree.itemClicked.connect(self.on_tree_item_clicked)
         self.tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
         files_layout.addWidget(self.tree)
-
-        self.lbl_stats = QLabel("0 tệp | 0 biểu tượng AST")
-        self.lbl_stats.setStyleSheet("color: #64748b; font-size: 10px;")
+        self.lbl_stats = QLabel("Chưa lập chỉ mục")
+        self.lbl_stats.setObjectName("muted")
         files_layout.addWidget(self.lbl_stats)
-
-        self.tabs.addTab(tab_files, "📁 Cây Tệp & AST")
-
+        self.tabs.addTab(tab_files, "Explorer")
+        self.tabs.setCurrentIndex(1)
         main_layout.addWidget(self.tabs)
-
-        # Set default tab to Conversations
-        self.tabs.setCurrentIndex(0)
 
     # ==================== PROJECT ACTIONS ====================
 
@@ -217,7 +136,8 @@ class SidebarWidget(QWidget):
         for i, p in enumerate(projects):
             p_path = p.get("path", "")
             p_name = p.get("name", "Project")
-            self.project_combo.addItem(f"📁 {p_name} ({p_path})", p_path)
+            self.project_combo.addItem(icon("folder"), p_name, p_path)
+            self.project_combo.setItemData(i, p_path, Qt.ItemDataRole.ToolTipRole)
             if os.path.abspath(p_path) == abs_active:
                 current_idx = i
 
@@ -254,7 +174,8 @@ class SidebarWidget(QWidget):
             date_str = updated_at[5:10] if len(updated_at) >= 10 else ""
 
             item = QListWidgetItem(self.conv_list)
-            item.setText(f"💬  {title}\n🕒 {time_str} ({date_str}) • {c.get('message_count', 0)} tin nhắn")
+            item.setText(f"{title}\n{date_str} · {time_str} · {c.get('message_count', 0)} tin nhắn")
+            item.setToolTip(title)
             item.setData(Qt.ItemDataRole.UserRole, c)
 
             if select_conv_id and c_id == select_conv_id:
@@ -268,6 +189,7 @@ class SidebarWidget(QWidget):
             self.current_conv_id = c_data["id"]
         else:
             self.current_conv_id = None
+        self.filter_conversations(self.conv_search.text())
 
     def on_conv_item_clicked(self, item: QListWidgetItem):
         c_data = item.data(Qt.ItemDataRole.UserRole)
@@ -321,48 +243,55 @@ class SidebarWidget(QWidget):
         self.tree.clear()
         files = self.agent.graph.files
         total_symbols = 0
-
+        folders = {}
+        file_icon, folder_icon = icon("code"), icon("folder")
         for fpath, fast in sorted(files.items()):
-            file_item = QTreeWidgetItem(self.tree)
-            file_item.setText(0, f"📄 {fpath}")
-            file_item.setText(1, f"{fast.total_lines} dòng")
+            parts = fpath.replace("\\", "/").split("/")
+            parent = self.tree.invisibleRootItem()
+            for i, part in enumerate(parts[:-1]):
+                key = "/".join(parts[:i + 1])
+                if key not in folders:
+                    folder = QTreeWidgetItem(parent, [part])
+                    folder.setIcon(0, folder_icon)
+                    folder.setData(0, Qt.ItemDataRole.UserRole, {"type": "folder"})
+                    folder.setExpanded(i < 1)
+                    folders[key] = folder
+                parent = folders[key]
+            file_item = QTreeWidgetItem(parent, [parts[-1]])
+            file_item.setIcon(0, file_icon)
+            file_item.setToolTip(0, f"{fpath} · {fast.total_lines} dòng")
             file_item.setData(0, Qt.ItemDataRole.UserRole, {"type": "file", "path": fpath})
-            file_item.setFont(0, QFont("Segoe UI", 9, QFont.Weight.Bold))
-
             for sym in fast.symbols:
                 total_symbols += 1
                 sym_item = QTreeWidgetItem(file_item)
-                prefix = "⚡" if sym.symbol_type == "function" else ("🏛️" if sym.symbol_type == "class" else "🔹")
-                args_str = f"({', '.join(sym.args)})" if sym.args else ""
-                sym_item.setText(0, f"{prefix} {sym.name}{args_str}")
-                sym_item.setText(1, f"L{sym.start_line}-{sym.end_line}")
+                suffix = "()" if sym.symbol_type == "function" else ""
+                sym_item.setText(0, sym.name + suffix)
+                sym_item.setForeground(0, QColor("#aebbd2"))
+                sym_item.setToolTip(0, f"{sym.symbol_type} · Dòng {sym.start_line}–{sym.end_line}")
                 sym_item.setData(0, Qt.ItemDataRole.UserRole, {
-                    "type": "symbol",
-                    "path": fpath,
-                    "start_line": sym.start_line,
-                    "end_line": sym.end_line,
-                    "name": sym.name
+                    "type": "symbol", "path": fpath,
+                    "start_line": sym.start_line, "end_line": sym.end_line, "name": sym.name
                 })
-            file_item.setExpanded(True)
-
-        self.lbl_stats.setText(f"{len(files)} tệp mã nguồn | {total_symbols} biểu tượng AST")
+        self.lbl_stats.setText(f"{len(files)} tệp · {total_symbols} symbols")
+        if self.file_search.text():
+            self.filter_tree(self.file_search.text())
 
     def filter_tree(self, text: str):
         query = text.strip().lower()
+
+        def visit(item, ancestor_matches=False):
+            data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+            matches = not query or ancestor_matches or query in item.text(0).lower() or query in data.get("path", "").lower()
+            child_matches = [visit(item.child(i), matches) for i in range(item.childCount())]
+            visible = matches or any(child_matches)
+            item.setHidden(not visible)
+            if query and visible and item.childCount():
+                item.setExpanded(True)
+            return visible
+
         root = self.tree.invisibleRootItem()
         for i in range(root.childCount()):
-            file_item = root.child(i)
-            file_match = query in file_item.text(0).lower()
-            visible_children = 0
-            for j in range(file_item.childCount()):
-                sym_item = file_item.child(j)
-                sym_match = query in sym_item.text(0).lower()
-                sym_item.setHidden(not sym_match and not file_match)
-                if sym_match or file_match:
-                    visible_children += 1
-            file_item.setHidden(visible_children == 0 and not file_match)
-            if visible_children > 0:
-                file_item.setExpanded(True)
+            visit(root.child(i))
 
     def on_tree_item_clicked(self, item: QTreeWidgetItem, col: int):
         data = item.data(0, Qt.ItemDataRole.UserRole)

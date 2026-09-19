@@ -4,10 +4,11 @@ from typing import Optional, List, Dict, Any
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QPlainTextEdit, QCheckBox, QPushButton, QFrame, QFileDialog,
-    QApplication, QScrollArea
+    QApplication, QScrollArea, QGridLayout, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal, QBuffer, QIODevice
 from PySide6.QtGui import QKeyEvent, QImage, QPixmap
+from desktop.icons import icon
 
 def qimage_to_data_uri(img: QImage) -> str:
     buf = QBuffer()
@@ -39,8 +40,8 @@ class ImageThumbnail(QFrame):
         self.index = index
         self.setStyleSheet("""
             QFrame {
-                background-color: #1e293b;
-                border: 1px solid #475569;
+                background-color: #30323a;
+                border: 1px solid #484c57;
                 border-radius: 6px;
             }
         """)
@@ -55,7 +56,7 @@ class ImageThumbnail(QFrame):
 
         display_name = name if len(name) <= 18 else (name[:15] + "...")
         lbl_name = QLabel(display_name)
-        lbl_name.setStyleSheet("color: #e2e8f0; font-size: 11px;")
+        lbl_name.setStyleSheet("color: #d5d7de; font-size: 11px;")
         layout.addWidget(lbl_name)
 
         btn_del = QPushButton("✕")
@@ -64,7 +65,7 @@ class ImageThumbnail(QFrame):
         btn_del.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                color: #94a3b8;
+                color: #9699a3;
                 border: none;
                 font-size: 11px;
                 font-weight: bold;
@@ -124,6 +125,7 @@ class PromptWidget(QWidget):
     graft_requested = Signal(str, str, dict) # task, target_file, options
     apply_requested = Signal()
     undo_requested = Signal()
+    settings_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -131,104 +133,132 @@ class PromptWidget(QWidget):
         self.init_ui()
 
     def init_ui(self):
+        self.setObjectName("promptPanel")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 8, 12, 10)
+        layout.setSpacing(7)
 
-        # Top line: Target file selector & Tokens Stat Badges
-        top_bar = QHBoxLayout()
-        top_bar.addWidget(QLabel("🎯 Tệp Mục Tiêu:"))
-
+        context_row = QHBoxLayout()
+        context_label = QLabel("Ngữ cảnh")
+        context_label.setObjectName("muted")
+        context_row.addWidget(context_label)
         self.target_file_combo = QComboBox()
-        self.target_file_combo.setMinimumWidth(240)
-        self.target_file_combo.addItem("(AI tự động phát hiện)", "")
-        top_bar.addWidget(self.target_file_combo)
-        top_bar.addStretch()
+        self.target_file_combo.setMinimumWidth(0)
+        self.target_file_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.target_file_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.target_file_combo.setMinimumContentsLength(12)
+        self.target_file_combo.addItem("Toàn bộ dự án", "")
+        self.target_file_combo.setToolTip("Chọn một tệp hoặc để Agent tìm ngữ cảnh trong dự án")
+        context_row.addWidget(self.target_file_combo, 1)
+        layout.addLayout(context_row)
 
-        # Token stats badges
-        self.badge_in = QLabel("Input: 0 tok")
-        self.badge_in.setStyleSheet("background-color: rgba(99, 102, 241, 0.2); color: #818cf8; border: 1px solid #4f46e5; border-radius: 4px; padding: 2px 6px; font-size: 11px;")
-        top_bar.addWidget(self.badge_in)
-
-        self.badge_out = QLabel("Output: 0 tok")
-        self.badge_out.setStyleSheet("background-color: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #059669; border-radius: 4px; padding: 2px 6px; font-size: 11px;")
-        top_bar.addWidget(self.badge_out)
-
-        self.badge_total = QLabel("Tổng: 0 tok")
-        self.badge_total.setStyleSheet("background-color: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid #475569; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: bold;")
-        top_bar.addWidget(self.badge_total)
-
-        layout.addLayout(top_bar)
-
-        # Thanh xem trước hình ảnh đính kèm (Image Preview Strip)
         self.preview_container = QWidget()
         self.preview_layout = QHBoxLayout(self.preview_container)
         self.preview_layout.setContentsMargins(0, 0, 0, 0)
-        self.preview_layout.setSpacing(8)
-        self.preview_layout.addStretch()
-        self.preview_container.setVisible(False)
-        layout.addWidget(self.preview_container)
+        self.preview_layout.setSpacing(6)
+        self.preview_scroll = QScrollArea()
+        self.preview_scroll.setWidgetResizable(True)
+        self.preview_scroll.setWidget(self.preview_container)
+        self.preview_scroll.setFixedHeight(64)
+        self.preview_scroll.hide()
+        layout.addWidget(self.preview_scroll)
 
-        # Prompt input text edit với hỗ trợ Paste ảnh & Drag-drop
+        composer = QFrame()
+        composer.setObjectName("composer")
+        composer_layout = QVBoxLayout(composer)
+        composer_layout.setContentsMargins(9, 8, 9, 7)
+        composer_layout.setSpacing(4)
         self.prompt_edit = PromptTextEdit(self)
-        self.prompt_edit.setPlaceholderText("Nhập yêu cầu lập trình hoặc dán ảnh chụp màn hình (Ctrl + V)...\nPhím tắt: Nhấn Ctrl + Enter để gửi cấy ghép.")
-        self.prompt_edit.setMaximumHeight(90)
-        layout.addWidget(self.prompt_edit)
+        self.prompt_edit.setObjectName("promptInput")
+        self.prompt_edit.setPlaceholderText("Hỏi Agent hoặc mô tả điều bạn muốn xây dựng…")
+        self.prompt_edit.setMinimumHeight(82)
+        self.prompt_edit.setMaximumHeight(110)
+        composer_layout.addWidget(self.prompt_edit)
 
-        # Bottom Action Bar
-        bottom_bar = QHBoxLayout()
-
-        # Options Checkboxes
-        self.chk_thinking = QCheckBox("Thinking Mode")
-        self.chk_thinking.setChecked(True)
-        self.chk_thinking.setToolTip("Cho phép AI suy nghĩ logic sâu trước khi cấy ghép")
-        bottom_bar.addWidget(self.chk_thinking)
-
-        self.chk_dual = QCheckBox("Dual AI Review")
-        self.chk_dual.setToolTip("Dùng thêm AI phản biện chéo để đảm bảo chất lượng code tối đa")
-        bottom_bar.addWidget(self.chk_dual)
-
-        self.chk_auto = QCheckBox("Tự động Áp dụng (Auto-Execute)")
-        self.chk_auto.setChecked(True)
-        self.chk_auto.setStyleSheet("color: #4ade80; font-weight: bold;")
-        self.chk_auto.setToolTip("Tự động tạo file, sửa code và thực thi ngay lập tức mà không cần nhấn xác nhận")
-        bottom_bar.addWidget(self.chk_auto)
-
-        self.chk_feedback = QCheckBox("Tự Động Đọc Log & Chạy Tiếp (Loop)")
-        self.chk_feedback.setChecked(True)
-        self.chk_feedback.setStyleSheet("color: #38bdf8; font-weight: bold;")
-        self.chk_feedback.setToolTip("AI tự động đọc log kết quả từ Terminal và gửi tiếp các lệnh cần thiết cho đến khi hoàn tất")
-        bottom_bar.addWidget(self.chk_feedback)
-
-        bottom_bar.addStretch()
-
-        # Nút Đính Kèm Ảnh
-        self.btn_attach = QPushButton("🖼️ Thêm Ảnh")
-        self.btn_attach.setToolTip("Đính kèm hình ảnh (PNG, JPG, WebP) hoặc có thể dán trực tiếp ảnh chụp màn hình bằng Ctrl + V vào ô nhập")
-        self.btn_attach.setStyleSheet("color: #a5b4fc; border-color: #4f46e5; font-size: 11px;")
+        tools = QWidget()
+        tools.setObjectName("composerTools")
+        tools_layout = QHBoxLayout(tools)
+        tools_layout.setContentsMargins(0, 0, 0, 0)
+        tools_layout.setSpacing(8)
+        self.btn_attach = QPushButton(icon("plus"), "")
+        self.btn_attach.setObjectName("iconButton")
+        self.btn_attach.setFixedSize(28, 28)
+        self.btn_attach.setToolTip("Đính kèm ảnh · Có thể dán ảnh bằng Ctrl+V")
+        self.btn_attach.setAccessibleName("Đính kèm ảnh")
         self.btn_attach.clicked.connect(self.choose_image_files)
-        bottom_bar.addWidget(self.btn_attach)
+        tools_layout.addWidget(self.btn_attach)
+        self.model_button = QPushButton("Model")
+        self.model_button.setObjectName("modelButton")
+        self.model_button.setMinimumWidth(0)
+        self.model_button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.model_button.clicked.connect(self.settings_requested.emit)
+        tools_layout.addWidget(self.model_button, 1)
+        self.btn_graft = QPushButton(icon("send", "#172338"), "")
+        self.btn_graft.setObjectName("primaryButton")
+        self.btn_graft.setFixedSize(30, 30)
+        self.btn_graft.setToolTip("Gửi yêu cầu (Ctrl+Enter)")
+        self.btn_graft.setAccessibleName("Gửi yêu cầu")
+        self.btn_graft.clicked.connect(self.submit_prompt)
+        tools_layout.addWidget(self.btn_graft)
+        composer_layout.addWidget(tools)
+        layout.addWidget(composer)
 
-        # Action Buttons
-        self.btn_undo = QPushButton("↩️ Hoàn Tác (Undo)")
-        self.btn_undo.setObjectName("undoButton")
+        options_row = QHBoxLayout()
+        self.mode_label = QLabel("Xem trước thay đổi")
+        self.mode_label.setObjectName("muted")
+        options_row.addWidget(self.mode_label)
+        options_row.addStretch()
+        self.btn_options = QPushButton("Tùy chọn ▾")
+        self.btn_options.setObjectName("iconButton")
+        self.btn_options.setCheckable(True)
+        options_row.addWidget(self.btn_options)
+        layout.addLayout(options_row)
+        self.options_panel = QWidget()
+        self.options_panel.setObjectName("promptOptions")
+        options_layout = QGridLayout(self.options_panel)
+        options_layout.setContentsMargins(0, 0, 0, 4)
+        self.chk_thinking = QCheckBox("Suy nghĩ sâu")
+        self.chk_thinking.setChecked(True)
+        self.chk_dual = QCheckBox("Dual AI Review")
+        self.chk_auto = QCheckBox("Tự động áp dụng")
+        self.chk_auto.setToolTip("Cho phép áp dụng các đề xuất mà không nhấn nút Áp dụng")
+        self.chk_feedback = QCheckBox("Đọc log và tiếp tục")
+        self.chk_feedback.setChecked(True)
+        self.chk_auto.toggled.connect(lambda enabled: self.mode_label.setText(
+            "Tự động áp dụng" if enabled else "Xem trước thay đổi"
+        ))
+        for i, checkbox in enumerate((self.chk_thinking, self.chk_dual, self.chk_auto, self.chk_feedback)):
+            options_layout.addWidget(checkbox, i // 2, i % 2)
+        self.options_panel.hide()
+        self.btn_options.toggled.connect(self.options_panel.setVisible)
+        self.btn_options.toggled.connect(lambda checked: self.btn_options.setText(
+            "Tùy chọn ▴" if checked else "Tùy chọn ▾"
+        ))
+        layout.addWidget(self.options_panel)
+
+        actions = QHBoxLayout()
+        self.btn_undo = QPushButton(icon("undo"), "Hoàn tác")
         self.btn_undo.setEnabled(False)
         self.btn_undo.clicked.connect(self.undo_requested.emit)
-        bottom_bar.addWidget(self.btn_undo)
-
-        self.btn_apply = QPushButton("💾 Áp Dụng (Apply)")
+        actions.addWidget(self.btn_undo)
+        self.btn_apply = QPushButton(icon("check", "#a8dab5"), "Áp dụng")
         self.btn_apply.setObjectName("successButton")
         self.btn_apply.setEnabled(False)
         self.btn_apply.clicked.connect(self.apply_requested.emit)
-        bottom_bar.addWidget(self.btn_apply)
+        actions.addWidget(self.btn_apply)
+        layout.addLayout(actions)
+        stats = QHBoxLayout()
+        self.badge_in = QLabel("Input: 0")
+        self.badge_out = QLabel("Output: 0")
+        self.badge_total = QLabel("0 token")
+        for badge in (self.badge_in, self.badge_out, self.badge_total):
+            badge.setObjectName("muted")
+            stats.addWidget(badge)
+        layout.addLayout(stats)
 
-        self.btn_graft = QPushButton("⚡ Gửi Yêu Cầu (Send / Graft)")
-        self.btn_graft.setObjectName("primaryButton")
-        self.btn_graft.setStyleSheet("padding: 8px 18px; font-weight: bold;")
-        self.btn_graft.clicked.connect(self.submit_prompt)
-        bottom_bar.addWidget(self.btn_graft)
-
-        layout.addLayout(bottom_bar)
+    def set_model(self, model: str):
+        self.model_button.setText(model)
+        self.model_button.setToolTip(f"{model} · Mở cấu hình AI")
 
     def choose_image_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -285,16 +315,12 @@ class PromptWidget(QWidget):
                 widget.deleteLater()
 
         if not self.attached_images:
-            self.preview_container.setVisible(False)
-            self.btn_attach.setText("🖼️ Thêm Ảnh")
+            self.preview_scroll.hide()
+            self.btn_attach.setToolTip("Đính kèm ảnh · Có thể dán ảnh bằng Ctrl+V")
             return
 
-        self.preview_container.setVisible(True)
-        self.btn_attach.setText(f"🖼️ Ảnh ({len(self.attached_images)})")
-
-        lbl_title = QLabel(f"📸 {len(self.attached_images)} ảnh đính kèm:")
-        lbl_title.setStyleSheet("color: #818cf8; font-size: 11px; font-weight: bold;")
-        self.preview_layout.addWidget(lbl_title)
+        self.preview_scroll.show()
+        self.btn_attach.setToolTip(f"Đính kèm ảnh ({len(self.attached_images)})")
 
         for i, img_item in enumerate(self.attached_images):
             thumb = ImageThumbnail(i, img_item["name"], img_item["pixmap"])
@@ -304,6 +330,8 @@ class PromptWidget(QWidget):
         self.preview_layout.addStretch()
 
     def submit_prompt(self):
+        if not self.btn_graft.isEnabled():
+            return
         task = self.prompt_edit.toPlainText().strip()
         images = [item["data_uri"] for item in self.attached_images]
 
@@ -327,9 +355,9 @@ class PromptWidget(QWidget):
     def update_file_list(self, files: List[str]):
         cur = self.target_file_combo.currentData()
         self.target_file_combo.clear()
-        self.target_file_combo.addItem("(AI tự động phát hiện)", "")
+        self.target_file_combo.addItem("Toàn bộ dự án", "")
         for f in sorted(files):
-            self.target_file_combo.addItem(f"📄 {f}", f)
+            self.target_file_combo.addItem(f, f)
         if cur:
             idx = self.target_file_combo.findData(cur)
             if idx >= 0:
@@ -339,6 +367,6 @@ class PromptWidget(QWidget):
         inp = tokens.get("input_tokens", 0)
         out = tokens.get("output_tokens", 0)
         tot = tokens.get("total_tokens", inp + out)
-        self.badge_in.setText(f"Input: {inp:,} tok")
-        self.badge_out.setText(f"Output: {out:,} tok")
-        self.badge_total.setText(f"Tổng: {tot:,} tok")
+        self.badge_in.setText(f"Input: {inp:,}")
+        self.badge_out.setText(f"Output: {out:,}")
+        self.badge_total.setText(f"{tot:,} token")

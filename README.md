@@ -35,6 +35,25 @@ python run.py --cli --dir "C:\duong-dan\toi\du-an"
 
 Hãy chọn đúng thư mục gốc của dự án. Đường dẫn và tệp ngoài workspace không nên được coi là một phần ngữ cảnh hay phạm vi thao tác của agent.
 
+## Giao diện desktop kiểu IDE
+
+Ứng dụng desktop PySide6 có giao diện ba vùng giống IDE: activity bar và cây tệp bên trái, editor/diff/terminal ở giữa, agent panel ở bên phải. Cách bố trí này lấy cảm hứng từ Google Antigravity nhưng vẫn giữ workflow an toàn của Graft: agent chỉ đề xuất diff, tạo file, xóa file hoặc lệnh terminal; bạn vẫn xác nhận trước khi áp dụng.
+
+```powershell
+python desktop_app.py --dir "C:\duong-dan\toi\du-an"
+```
+
+Phím tắt hữu ích:
+
+| Phím | Chức năng |
+| --- | --- |
+| `Ctrl+L` | Focus prompt của agent |
+| `Ctrl+Enter` | Gửi yêu cầu hiện tại |
+| `Ctrl+P` | Focus tìm file/symbol |
+| `Ctrl+J` | Ẩn/hiện terminal |
+| `Alt+A` | Ẩn/hiện agent panel |
+| `Ctrl+N` | Bắt đầu cuộc trò chuyện mới |
+
 ## Quy tắc an toàn của coding agent
 
 Đọc ngữ cảnh là thao tác chỉ đọc. Với mọi hành động có tác động, agent phải hiển thị nội dung cần làm và chờ xác nhận riêng của bạn:
@@ -89,4 +108,13 @@ Chạy bộ kiểm thử phù hợp, nhưng hỏi tôi trước khi thực thi l
 ## Khả năng Graft kế thừa
 
 Dự án vẫn giữ các thành phần AST grafting: lập chỉ mục class/hàm, tạo diff và kiểm tra cú pháp trước khi áp dụng. Chúng hỗ trợ agent giới hạn thay đổi vào phần mã cần thiết thay vì viết lại cả tệp. Một số giao diện desktop/web cũ hướng tới workflow gateway; CLI là cách rõ ràng nhất để sử dụng chế độ Gemini trực tiếp và các bước xác nhận an toàn.
-"# graft-code-agent" 
+
+## Kiểm thử desktop
+
+Các kiểm thử desktop chạy ở chế độ offscreen nên có thể dùng trong CI Linux:
+
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
+python -m pytest -q
+python -m compileall -q desktop
+```
