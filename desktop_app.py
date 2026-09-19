@@ -20,6 +20,7 @@ def run_desktop(folder: str = None):
     )
 
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     app.setApplicationName("Graft Code Agent")
     app.setOrganizationName("Antigravity")
 

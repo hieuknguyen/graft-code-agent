@@ -1,3 +1,4 @@
+import html
 import re
 from urllib.parse import quote, unquote
 from typing import List, Dict, Any, Optional
@@ -6,7 +7,8 @@ from PySide6.QtWidgets import (
     QPushButton, QFrame
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QTextCursor, QTextDocument
+from desktop.icons import icon
 
 class ChatWidget(QWidget):
     action_apply_clicked = Signal(dict)
@@ -24,65 +26,52 @@ class ChatWidget(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
-
-        header = QHBoxLayout()
-        icon = QLabel("💬")
-        icon.setStyleSheet("font-size: 15px;")
-        header.addWidget(icon)
-
-        title = QLabel("TRỢ LÝ AI AGENT (HỎI ĐÁP & ĐIỀU PHỐI DỰ ÁN)")
-        title.setStyleSheet("font-weight: bold; color: #818cf8; font-size: 12px;")
-        header.addWidget(title)
-        header.addStretch()
-
-        self.btn_clear = QPushButton("🗑️ Xóa Hội Thoại")
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.btn_clear = QPushButton(icon("close"), "")
+        self.btn_clear.setObjectName("iconButton")
+        self.btn_clear.setFixedSize(28, 28)
+        self.btn_clear.setToolTip("Dọn màn hình trò chuyện · Lịch sử vẫn được lưu")
+        self.btn_clear.setAccessibleName("Dọn màn hình trò chuyện")
         self.btn_clear.clicked.connect(self.clear_chat)
-        header.addWidget(self.btn_clear)
-        layout.addLayout(header)
-
         self.browser = QTextBrowser()
+        self.browser.setObjectName("chatBrowser")
         self.browser.setOpenExternalLinks(False)
+        self.browser.setOpenLinks(False)
         self.browser.anchorClicked.connect(self.on_link_clicked)
-        self.browser.setStyleSheet("""
-            QTextBrowser {
-                background-color: #070a13;
-                border: 1px solid #1e293b;
-                border-radius: 8px;
-                padding: 12px;
-                font-family: 'Segoe UI', -apple-system, sans-serif;
-                font-size: 13px;
-                line-height: 1.6;
-            }
-        """)
         layout.addWidget(self.browser)
-
         self.render_all()
 
     def markdown_to_html(self, text: str) -> str:
-        def code_block_repl(m):
-            code_content = m.group(1).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            return f"<pre style='background-color: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-family: Consolas, monospace; font-size: 12px; color: #cbd5e1; overflow-x: auto;'>{code_content}</pre>"
-        
-        t = re.sub(r'```(?:[a-zA-Z0-9_-]+)?\s*\n(.*?)```', code_block_repl, text, flags=re.DOTALL)
-        t = re.sub(r'`([^`]+)`', r"<code style='background-color: #1e293b; color: #a5b4fc; padding: 2px 5px; border-radius: 4px; font-family: Consolas, monospace; font-size: 12px;'>\1</code>", t)
-        t = re.sub(r'^### (.*?)$', r"<h3 style='color: #818cf8; font-size: 14px; margin: 12px 0 6px 0; font-weight: bold;'>\1</h3>", t, flags=re.MULTILINE)
-        t = re.sub(r'^## (.*?)$', r"<h2 style='color: #a5b4fc; font-size: 16px; margin: 14px 0 8px 0; font-weight: bold; border-bottom: 1px solid #1e293b; padding-bottom: 4px;'>\1</h2>", t, flags=re.MULTILINE)
-        t = re.sub(r'^# (.*?)$', r"<h1 style='color: #c7d2fe; font-size: 18px; margin: 16px 0 10px 0; font-weight: 800;'>\1</h1>", t, flags=re.MULTILINE)
-        t = re.sub(r'\*\*(.*?)\*\*', r"<b>\1</b>", t)
-        t = re.sub(r'\*(.*?)\*', r"<i>\1</i>", t)
-        t = re.sub(r'^[ \t]*[-*] (.*?)$', r"<li style='margin-left: 16px; color: #e2e8f0;'>\1</li>", t, flags=re.MULTILINE)
+        doc = QTextDocument()
+        doc.setMarkdown(text)
+        body_match = re.search(r"<body[^>]*>(.*)</body>", doc.toHtml(), flags=re.DOTALL)
+        body = body_match.group(1).strip() if body_match else html.escape(text).replace("\n", "<br>")
+        body = re.sub(r'<p style="', '<p style="color:#c4c7cf; ', body)
+        body = re.sub(r'<li style="', '<li style="color:#c4c7cf; ', body)
+        body = re.sub(r'<pre style="', '<pre style="background-color:#25272d; color:#c4c7cf; ', body)
+        body = re.sub(r'<h([1-6]) style="', r'<h\1 style="color:#e3e3e8; ', body)
+        body = body.replace("<code>", "<code style='color:#aecbfa; background-color:#30323a;'>")
+        return body
 
-        lines = t.splitlines()
-        formatted_lines = []
-        for line in lines:
-            if line.startswith("<h") or line.startswith("<pre") or line.startswith("<li") or line.strip() == "":
-                formatted_lines.append(line)
-            else:
-                formatted_lines.append(f"<p style='margin: 4px 0; color: #cbd5e1;'>{line}</p>")
+    def _message_spacer(self) -> str:
+        return "<p style='font-size:6px; line-height:6px; margin:0;'>&nbsp;</p>"
 
-        return "\n".join(formatted_lines)
+    def _bubble(self, inner_html: str, bg: str, border: str = "#30323a", align: str = "left") -> str:
+        width = "86%" if align == "right" else "100%"
+        align_attr = "right" if align == "right" else "left"
+        return f"""
+        <table width='100%' cellspacing='0' cellpadding='0' border='0'>
+          <tr>
+            <td align='{align_attr}'>
+              <table width='{width}' cellspacing='0' cellpadding='12' border='0'
+                     style='background-color:{bg}; border:1px solid {border};'>
+                <tr><td>{inner_html}</td></tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+        {self._message_spacer()}
+        """
 
     def add_user_message(self, text: str, images: Optional[List[str]] = None, persist: bool = True):
         msg_dict = {"role": "user", "text": text, "images": images or []}
@@ -90,24 +79,23 @@ class ChatWidget(QWidget):
             self.raw_messages.append(msg_dict)
             self.message_persisted.emit(msg_dict)
 
-        escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        escaped = html.escape(text).replace("\n", "<br>")
         
         images_html = ""
         if images:
             img_tags = ""
             for img_uri in images:
-                img_tags += f"<div style='margin-top: 8px;'><img src='{img_uri}' style='max-width: 320px; max-height: 220px; border-radius: 6px; border: 1px solid #4f46e5;' /></div>"
-            images_html = f"<div style='margin-top: 6px;'>{img_tags}</div>"
+                img_tags += f"<p style='margin-top:8px;'><img src='{img_uri}' width='320' /></p>"
+            images_html = img_tags
 
-        msg_html = f"""
-        <div style='margin-bottom: 16px; display: flex; justify-content: flex-end;'>
-            <div style='background-color: #1e1b4b; border: 1px solid #4338ca; border-radius: 8px; padding: 10px 14px; max-width: 85%; color: #e0e7ff;'>
-                <div style='font-size: 11px; font-weight: bold; color: #a5b4fc; margin-bottom: 4px;'>🧑 Bạn:</div>
-                <div style='white-space: pre-wrap; font-size: 13px;'>{escaped}</div>
-                {images_html}
-            </div>
-        </div>
-        """
+        msg_html = self._bubble(
+            "<p style='font-size:11px; font-weight:bold; color:#aecbfa; margin:0 0 8px 0;'>BẠN</p>"
+            f"<p style='font-size:13px; color:#e3e3e8; margin:0;'>{escaped}</p>"
+            f"{images_html}",
+            "#2d313a",
+            "#414855",
+            align="right",
+        )
         self.chat_history.append(msg_html)
         self.render_all()
 
@@ -135,22 +123,22 @@ class ChatWidget(QWidget):
                     f = act['file']
                     if auto_applied:
                         cards_html += f"""
-                        <div style='margin-top: 10px; background-color: #0f172a; border: 1px solid #22c55e; border-radius: 6px; padding: 10px;'>
-                            <div style='color: #4ade80; font-weight: bold;'>💾 Đã tự động cấy ghép AST vào: <code>{f}</code></div>
-                            <div style='color: #94a3b8; font-size: 11px; margin: 4px 0;'>{act.get('msg', '')}</div>
+                        <div style='margin-top: 10px; background-color: #25272d; border: 1px solid #22c55e; border-radius: 6px; padding: 10px;'>
+                            <div style='color: #a8dab5; font-weight: bold;'>💾 Đã tự động cấy ghép AST vào: <code>{f}</code></div>
+                            <div style='color: #9699a3; font-size: 11px; margin: 4px 0;'>{act.get('msg', '')}</div>
                             <div style='margin-top: 6px;'>
-                                <a href='graftview:///{quote(f)}' style='background-color: #1e293b; color: #38bdf8; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; margin-right: 8px;'>🔍 Xem Diff Chi Tiết</a>
+                                <a href='graftview:///{quote(f)}' style='background-color: #30323a; color: #aecbfa; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; margin-right: 8px;'>🔍 Xem Diff Chi Tiết</a>
                                 <span style='color: #22c55e; font-size: 11px; font-weight: bold;'>✅ Đã lưu trực tiếp vào file</span>
                             </div>
                         </div>
                         """
                     else:
                         cards_html += f"""
-                        <div style='margin-top: 10px; background-color: #0f172a; border: 1px solid #22c55e; border-radius: 6px; padding: 10px;'>
-                            <div style='color: #4ade80; font-weight: bold;'>⚡ Đã chuẩn bị cấy ghép AST vào: <code>{f}</code></div>
-                            <div style='color: #94a3b8; font-size: 11px; margin: 4px 0;'>{act.get('msg', '')}</div>
+                        <div style='margin-top: 10px; background-color: #25272d; border: 1px solid #22c55e; border-radius: 6px; padding: 10px;'>
+                            <div style='color: #a8dab5; font-weight: bold;'>⚡ Đã chuẩn bị cấy ghép AST vào: <code>{f}</code></div>
+                            <div style='color: #9699a3; font-size: 11px; margin: 4px 0;'>{act.get('msg', '')}</div>
                             <div style='margin-top: 6px;'>
-                                <a href='graftview:///{quote(f)}' style='background-color: #1e293b; color: #38bdf8; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; margin-right: 8px;'>🔍 Xem Diff Chi Tiết</a>
+                                <a href='graftview:///{quote(f)}' style='background-color: #30323a; color: #aecbfa; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; margin-right: 8px;'>🔍 Xem Diff Chi Tiết</a>
                                 <a href='graftapply:///{quote(f)}' style='background-color: #15803d; color: #ffffff; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold;'>💾 Áp Dụng Ngay</a>
                             </div>
                         </div>
@@ -167,20 +155,20 @@ class ChatWidget(QWidget):
                 f = cf['file']
                 if auto_applied:
                     cards_html += f"""
-                    <div style='margin-top: 10px; background-color: #0f172a; border: 1px solid #6366f1; border-radius: 6px; padding: 10px;'>
-                        <div style='color: #818cf8; font-weight: bold;'>📝 Đã tự động tạo file: <code>{f}</code></div>
+                    <div style='margin-top: 10px; background-color: #25272d; border: 1px solid #60799c; border-radius: 6px; padding: 10px;'>
+                        <div style='color: #aecbfa; font-weight: bold;'>📝 Đã tự động tạo file: <code>{f}</code></div>
                         <div style='margin-top: 6px;'>
-                            <a href='open_file:{quote(f)}' style='background-color: #4f46e5; color: #ffffff; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold;'>📄 Mở xem file</a>
+                            <a href='open_file:{quote(f)}' style='background-color: #465d80; color: #ffffff; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold;'>📄 Mở xem file</a>
                             <span style='color: #22c55e; font-size: 11px; font-weight: bold; margin-left: 8px;'>✅ Đã tạo thành công</span>
                         </div>
                     </div>
                     """
                 else:
                     cards_html += f"""
-                    <div style='margin-top: 10px; background-color: #0f172a; border: 1px solid #6366f1; border-radius: 6px; padding: 10px;'>
-                        <div style='color: #818cf8; font-weight: bold;'>📝 Đề xuất tạo file mới: <code>{f}</code></div>
+                    <div style='margin-top: 10px; background-color: #25272d; border: 1px solid #60799c; border-radius: 6px; padding: 10px;'>
+                        <div style='color: #aecbfa; font-weight: bold;'>📝 Đề xuất tạo file mới: <code>{f}</code></div>
                         <div style='margin-top: 6px;'>
-                            <a href='createfile:///{quote(f)}' style='background-color: #4f46e5; color: #ffffff; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold;'>✅ Tạo File Này</a>
+                            <a href='createfile:///{quote(f)}' style='background-color: #465d80; color: #ffffff; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold;'>✅ Tạo File Này</a>
                         </div>
                     </div>
                     """
@@ -205,21 +193,21 @@ class ChatWidget(QWidget):
                 desc = cmd.get('description', '')
                 if auto_applied:
                     cards_html += f"""
-                    <div style='margin-top: 10px; background-color: #082f49; border: 1px solid #0284c7; border-radius: 6px; padding: 10px;'>
-                        <div style='color: #38bdf8; font-weight: bold;'>💻 Đang thực thi lệnh Terminal: <code>{c}</code></div>
-                        {f"<div style='color: #bae6fd; font-size: 11px; margin: 2px 0;'>Mục đích: {desc}</div>" if desc else ""}
+                    <div style='margin-top: 10px; background-color: #252e3b; border: 1px solid #476080; border-radius: 6px; padding: 10px;'>
+                        <div style='color: #aecbfa; font-weight: bold;'>💻 Đang thực thi lệnh Terminal: <code>{c}</code></div>
+                        {f"<div style='color: #b9c9df; font-size: 11px; margin: 2px 0;'>Mục đích: {desc}</div>" if desc else ""}
                         <div style='margin-top: 6px;'>
-                            <span style='color: #38bdf8; font-size: 11px; font-weight: bold;'>🚀 Đã tự động gửi tới Terminal</span>
+                            <span style='color: #aecbfa; font-size: 11px; font-weight: bold;'>🚀 Đã tự động gửi tới Terminal</span>
                         </div>
                     </div>
                     """
                 else:
                     cards_html += f"""
-                    <div style='margin-top: 10px; background-color: #082f49; border: 1px solid #0284c7; border-radius: 6px; padding: 10px;'>
-                        <div style='color: #38bdf8; font-weight: bold;'>💻 Lệnh Terminal Đề Xuất: <code>{c}</code></div>
-                        {f"<div style='color: #bae6fd; font-size: 11px; margin: 2px 0;'>Mục đích: {desc}</div>" if desc else ""}
+                    <div style='margin-top: 10px; background-color: #252e3b; border: 1px solid #476080; border-radius: 6px; padding: 10px;'>
+                        <div style='color: #aecbfa; font-weight: bold;'>💻 Lệnh Terminal Đề Xuất: <code>{c}</code></div>
+                        {f"<div style='color: #b9c9df; font-size: 11px; margin: 2px 0;'>Mục đích: {desc}</div>" if desc else ""}
                         <div style='margin-top: 6px;'>
-                            <a href='runcmd:///{quote(c)}' style='background-color: #0284c7; color: #ffffff; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold;'>▶️ Chạy Lệnh Trong Terminal</a>
+                            <a href='runcmd:///{quote(c)}' style='background-color: #476080; color: #ffffff; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold;'>▶️ Chạy Lệnh Trong Terminal</a>
                         </div>
                     </div>
                     """
@@ -228,18 +216,16 @@ class ChatWidget(QWidget):
         if tokens:
             inp = tokens.get('input_tokens', 0)
             out = tokens.get('output_tokens', 0)
-            token_info = f"<div style='margin-top: 8px; font-size: 11px; color: #64748b;'>📊 Tiêu thụ: Input {inp:,} tok | Output {out:,} tok</div>"
+            token_info = f"<div style='margin-top: 8px; font-size: 11px; color: #9699a3;'>📊 Tiêu thụ: Input {inp:,} tok | Output {out:,} tok</div>"
 
-        msg_html = f"""
-        <div style='margin-bottom: 20px; display: flex;'>
-            <div style='background-color: #0d1322; border: 1px solid #1e293b; border-radius: 8px; padding: 12px 16px; width: 95%;'>
-                <div style='font-size: 11px; font-weight: bold; color: #818cf8; margin-bottom: 6px;'>⚡ Graft Agent:</div>
-                <div style='font-size: 13px;'>{content_html}</div>
-                {cards_html}
-                {token_info}
-            </div>
-        </div>
-        """
+        msg_html = self._bubble(
+            "<p style='font-size:11px; font-weight:bold; color:#aecbfa; margin:0 0 8px 0;'>GRAFT</p>"
+            f"<div style='font-size:13px;'>{content_html}</div>"
+            f"{cards_html}"
+            f"{token_info}",
+            "#202126",
+            "#30323a",
+        )
         self.chat_history.append(msg_html)
         self.render_all()
 
@@ -249,14 +235,12 @@ class ChatWidget(QWidget):
             self.raw_messages.append(msg_dict)
             self.message_persisted.emit(msg_dict)
 
-        msg_html = f"""
-        <div style='margin-bottom: 16px;'>
-            <div style='background-color: #0f172a; border-left: 4px solid #6366f1; border-radius: 6px; padding: 10px 14px;'>
-                <div style='font-size: 12px; font-weight: bold; color: #818cf8;'>{title}</div>
-                <div style='font-size: 12px; color: #cbd5e1; margin-top: 4px;'>{text}</div>
-            </div>
-        </div>
-        """
+        msg_html = self._bubble(
+            f"<p style='font-size:12px; font-weight:bold; color:#aecbfa; margin:0 0 6px 0;'>{html.escape(title)}</p>"
+            f"<p style='font-size:12px; color:#c4c7cf; margin:0;'>{html.escape(text)}</p>",
+            "#25272d",
+            "#60799c",
+        )
         self.chat_history.append(msg_html)
         self.render_all()
 
@@ -284,15 +268,23 @@ class ChatWidget(QWidget):
         self.render_all()
 
     def render_all(self):
+        content = ''.join(self.chat_history) or (
+            "<p style='margin-top:52px; color:#aecbfa; font-size:28px;'>✧</p>"
+            "<h2 style='font-size:20px; color:#e3e3e8; font-weight:500;'>"
+            "Bạn muốn xây dựng<br>điều gì hôm nay?</h2>"
+            "<p style='color:#9699a3; margin-top:12px;'>Hỏi về dự án, tìm lỗi hoặc "
+            "mô tả thay đổi bạn muốn thực hiện.</p>"
+            "<p style='color:#9699a3; margin-top:22px;'>Ctrl+L để bắt đầu · Ctrl+Enter để gửi</p>"
+        )
         full_html = f"""
         <html>
         <head>
             <style>
-                body {{ background-color: #070a13; color: #e2e8f0; margin: 0; padding: 0; }}
+                body {{ background-color: #202126; color: #e3e3e8; margin: 0; padding: 0; }}
             </style>
         </head>
         <body>
-            {''.join(self.chat_history)}
+            {content}
         </body>
         </html>
         """
