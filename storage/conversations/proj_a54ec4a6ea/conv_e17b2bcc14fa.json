@@ -1,0 +1,17 @@
+{
+  "id": "conv_e17b2bcc14fa",
+  "project_id": "proj_a54ec4a6ea",
+  "title": "Test message with image",
+  "created_at": "2026-09-14 14:39:40",
+  "updated_at": "2026-09-14 14:39:40",
+  "messages": [
+    {
+      "images": [
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAeCAIAAAC0Ujn1AAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAJklEQVRIie3MQQEAAAQEsKN/Z1J42QKsMjnSV7FarVar1Wq1+kO96JMBO0de2WMAAAAASUVORK5CYII="
+      ],
+      "role": "user",
+      "text": "Test message with image",
+      "timestamp": "14:39"
+    }
+  ]
+}

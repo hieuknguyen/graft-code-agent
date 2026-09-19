@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Graft Code Agent - AI Surgical Coding Assistant</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    /* Custom Scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    .diff-add { background-color: rgba(34, 197, 94, 0.15); color: #4ade80; }
+    .diff-del { background-color: rgba(239, 68, 68, 0.15); color: #f87171; }
+    .diff-hunk { background-color: rgba(56, 189, 248, 0.1); color: #38bdf8; font-weight: 600; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased select-none">
+
+  <!-- Top Navigation Bar -->
+  <header class="h-16 border-b border-slate-800 bg-slate-900/80 backdrop-blur px-5 flex items-center justify-between sticky top-0 z-30">
+    <div class="flex items-center space-x-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-cyan-400 flex items-center justify-center shadow-lg shadow-indigo-500/20 text-white font-bold text-xl">
+        ⚡
+      </div>
+      <div>
+        <div class="flex items-center space-x-2">
+          <h1 class="font-extrabold text-base tracking-tight text-white flex items-center gap-1.5">
+            GRAFT <span class="text-indigo-400 font-mono text-xs px-1.5 py-0.5 rounded bg-indigo-950/80 border border-indigo-500/30">AGENT</span>
+          </h1>
+          <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            Surgical AST Engine
+          </span>
+        </div>
+        <p class="text-[11px] text-slate-400 truncate max-w-sm" id="root-dir-text">Đang kết nối...</p>
+      </div>
+    </div>
+
+    <!-- Right status & controls -->
+    <div class="flex items-center space-x-3">
+      <div id="token-badge-nav" class="hidden items-center space-x-2 text-xs font-mono">
+        <span class="px-2 py-1 rounded bg-sky-500/10 text-sky-400 border border-sky-500/25" id="nav-input-tok">Input: 0 tok</span>
+        <span class="px-2 py-1 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/25" id="nav-output-tok">Output: 0 tok</span>
+      </div>
+
+      <div class="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700 text-xs">
+        <i data-lucide="cpu" class="w-3.5 h-3.5 text-indigo-400"></i>
+        <span class="font-mono text-slate-300" id="model-nav-text">gemini-3.8-flash-tiered</span>
+      </div>
+
+      <button id="btn-undo" onclick="handleUndo()" class="hidden items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-medium transition cursor-pointer">
+        <i data-lucide="undo-2" class="w-3.5 h-3.5"></i>
+        <span>Hoàn tác (<span id="undo-count">0</span>)</span>
+      </button>
+
+      <button onclick="handleRescan()" class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer" title="Quét lại AST Codebase">
+        <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+      </button>
+
+      <button onclick="openConfigModal()" class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer" title="Cài đặt">
+        <i data-lucide="settings" class="w-4 h-4"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Content Body -->
+  <div class="flex-1 flex overflow-hidden">
+
+    <!-- Left Sidebar: Codebase AST Explorer (320px) -->
+    <aside class="w-80 border-r border-slate-800 bg-slate-900/40 flex flex-col shrink-0">
+      <!-- Search Box -->
+      <div class="p-3 border-b border-slate-800 flex flex-col gap-2">
+        <div class="flex items-center justify-between text-xs text-slate-400 font-semibold px-1">
+          <span class="flex items-center gap-1.5">
+            <i data-lucide="folder-tree" class="w-3.5 h-3.5 text-indigo-400"></i>
+            AST Codebase Tree
+          </span>
+          <span class="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-mono text-slate-300" id="files-count-badge">0 files</span>
+        </div>
+        <div class="relative">
+          <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5"></i>
+          <input
+            type="text"
+            id="tree-search"
+            placeholder="Tìm hàm, class, tệp..."
+            oninput="filterTree(this.value)"
+            class="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition"
+          />
+        </div>
+      </div>
+
+      <!-- File List -->
+      <div class="flex-1 overflow-y-auto p-2 space-y-1" id="file-tree-container">
+        <div class="p-4 text-center text-xs text-slate-500 flex flex-col items-center gap-2">
+          <i data-lucide="loader-2" class="w-5 h-5 animate-spin text-indigo-400"></i>
+          <span>Đang nạp cây biểu tượng AST...</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Center / Right: Interactive Graft Studio -->
+    <main class="flex-1 flex flex-col min-w-0 bg-slate-950 overflow-y-auto p-5 space-y-5">
+
+      <!-- Target & Prompt Box -->
+      <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 shadow-xl flex flex-col gap-3">
+        <!-- Target selector and badges -->
+        <div class="flex items-center justify-between flex-wrap gap-2 text-xs">
+          <div class="flex items-center space-x-2">
+            <span class="text-slate-400">Mục tiêu cấy ghép:</span>
+            <div id="target-pill" class="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-indigo-500/10 text-indigo-300 border border-indigo-500/30 font-mono">
+              <i data-lucide="file-code" class="w-3.5 h-3.5"></i>
+              <span id="target-file-name">(Tự động nhận diện từ câu hỏi)</span>
+              <button onclick="clearTargetFile()" class="hover:text-red-400 ml-1" title="Xóa file chỉ định">✕</button>
+            </div>
+          </div>
+
+          <div class="flex items-center space-x-3 text-slate-300 text-xs">
+            <label class="flex items-center space-x-1.5 cursor-pointer">
+              <input type="checkbox" id="chk-thinking" checked class="rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-0">
+              <span>Thinking Mode</span>
+            </label>
+            <label class="flex items-center space-x-1.5 cursor-pointer">
+              <input type="checkbox" id="chk-dual-ai" class="rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-0">
+              <span>Dual AI (Phản biện)</span>
+            </label>
+            <label class="flex items-center space-x-1.5 cursor-pointer">
+              <input type="checkbox" id="chk-auto-apply" class="rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-0">
+              <span>Tự động áp dụng (Auto Apply)</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Image Preview Strip -->
+        <div id="image-preview-container" class="hidden flex items-center gap-2 flex-wrap pb-1"></div>
+
+        <!-- Textarea input -->
+        <div class="relative">
+          <textarea
+            id="task-input"
+            rows="3"
+            placeholder="Nhập yêu cầu cấy ghép code hoặc dán ảnh chụp màn hình (Ctrl + V)..."
+            class="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500/80 transition resize-none leading-relaxed font-sans"
+            onkeydown="if(event.key==='Enter' && event.ctrlKey) handleExecuteGraft()"
+          ></textarea>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="flex items-center justify-between pt-1">
+          <div class="flex items-center space-x-3 text-[11px] text-slate-500">
+            <span>Mẹo: <kbd class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-slate-300">Ctrl + Enter</kbd> để gửi</span>
+            <label class="flex items-center space-x-1.5 text-indigo-400 hover:text-indigo-300 cursor-pointer border border-indigo-500/30 px-2.5 py-1 rounded-lg bg-indigo-500/10 transition">
+              <i data-lucide="image" class="w-3.5 h-3.5"></i>
+              <span id="btn-attach-text" class="font-medium">Thêm Ảnh</span>
+              <input type="file" id="image-file-input" accept="image/*" multiple class="hidden" onchange="handleImageUpload(event)" />
+            </label>
+          </div>
+
+          <button
+            id="btn-graft"
+            onclick="handleExecuteGraft()"
+            class="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white font-medium text-xs shadow-lg shadow-indigo-600/25 transition active:scale-95 cursor-pointer disabled:opacity-50"
+          >
+            <i data-lucide="wand-2" class="w-4 h-4"></i>
+            <span>Phẫu Thuật Cấy Ghép (Graft Code)</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Live Loading State -->
+      <div id="loading-spinner" class="hidden p-8 text-center flex flex-col items-center justify-center space-y-3 bg-slate-900/30 border border-slate-800/80 rounded-2xl">
+        <div class="w-10 h-10 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
+        <div class="text-sm font-semibold text-indigo-300" id="loading-msg">AI đang phân tích AST và tính toán vị trí cấy ghép...</div>
+        <div class="text-xs text-slate-500">Đang giao tiếp với antigravity-fastapi Gateway</div>
+      </div>
+
+      <!-- Results Display Container -->
+      <div id="results-container" class="space-y-4"></div>
+
+    </main>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="config-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+          <i data-lucide="settings" class="w-4 h-4 text-indigo-400"></i>
+          Cấu Hình Graft Code Agent
+        </h3>
+        <button onclick="closeConfigModal()" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Gateway URL:</label>
+          <input type="text" id="cfg-gateway-url" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">API Key:</label>
+          <input type="text" id="cfg-api-key" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono focus:outline-none focus:border-indigo-500">
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Mô hình chính (Model):</label>
+            <select id="cfg-model" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 focus:outline-none focus:border-indigo-500">
+              <option value="gemini-3.8-flash-tiered">gemini-3.8-flash-tiered</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+              <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+              <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">AI Phản Biện (Evaluator):</label>
+            <select id="cfg-eval-model" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 focus:outline-none focus:border-indigo-500">
+              <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+              <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+              <option value="gemini-3.8-flash-tiered">gemini-3.8-flash-tiered</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end space-x-2 pt-3 border-t border-slate-800">
+        <button onclick="closeConfigModal()" class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs">Hủy</button>
+        <button onclick="saveConfigModal()" class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold">Lưu Thay Đổi</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast" class="fixed bottom-5 right-5 z-50 hidden px-4 py-3 rounded-xl shadow-2xl text-xs font-medium flex items-center space-x-2 transition-all"></div>
+
+  <script>
+    let treeData = [];
+    let selectedTargetFile = null;
+    let lastGraftResult = null;
+
+    // Toast helper
+    function showToast(msg, type = 'info') {
+      const t = document.getElementById('toast');
+      t.className = `fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-2xl text-xs font-medium flex items-center space-x-2 transition-all ${
+        type === 'success' ? 'bg-emerald-600 text-white' :
+        type === 'error' ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-100 border border-slate-700'
+      }`;
+      t.innerHTML = `<span>${msg}</span>`;
+      t.classList.remove('hidden');
+      setTimeout(() => t.classList.add('hidden'), 3500);
+    }
+
+    // Initialize data
+    async function init() {
+      lucide.createIcons();
+      await loadStatus();
+      await loadTree();
+    }
+
+    async function loadStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        document.getElementById('root-dir-text').innerText = data.root_dir;
+        document.getElementById('model-nav-text').innerText = data.model;
+        document.getElementById('files-count-badge').innerText = `${data.files_count} files (${data.symbols_count} symbols)`;
+
+        const undoBtn = document.getElementById('btn-undo');
+        if (data.has_undo) {
+          undoBtn.classList.remove('hidden');
+          undoBtn.classList.add('flex');
+          document.getElementById('undo-count').innerText = data.backups_count;
+        } else {
+          undoBtn.classList.add('hidden');
+          undoBtn.classList.remove('flex');
+        }
+      } catch (e) {
+        console.error('Lỗi nạp status:', e);
+      }
+    }
+
+    async function loadTree() {
+      try {
+        const res = await fetch('/api/tree');
+        const data = await res.json();
+        treeData = data.files || [];
+        renderTree(treeData);
+      } catch (e) {
+        console.error('Lỗi nạp tree:', e);
+      }
+    }
+
+    function renderTree(files) {
+      const container = document.getElementById('file-tree-container');
+      if (!files || files.length === 0) {
+        container.innerHTML = `<div class="p-4 text-center text-xs text-slate-500">Không tìm thấy file mã nguồn nào</div>`;
+        return;
+      }
+
+      container.innerHTML = files.map(f => {
+        const symbolsHtml = (f.symbols || []).map(s => `
+          <div class="flex items-center justify-between text-[11px] py-1 px-2 rounded hover:bg-slate-800/80 text-slate-400 hover:text-slate-200 transition cursor-pointer" onclick="setTargetFile('${f.path}')">
+            <div class="flex items-center space-x-1.5 truncate">
+              <span class="text-[9px] px-1 py-0.2 rounded font-mono ${s.type === 'class' ? 'bg-amber-500/20 text-amber-300' : 'bg-blue-500/20 text-blue-300'}">${s.type}</span>
+              <span class="truncate font-mono">${s.parent ? s.parent + '.' : ''}${s.name}</span>
+            </div>
+            <span class="text-[10px] text-slate-600 font-mono">L${s.line}</span>
+          </div>
+        `).join('');
+
+        return `
+          <div class="border border-slate-800/60 rounded-xl overflow-hidden bg-slate-950/40">
+            <div class="p-2 bg-slate-900/60 hover:bg-slate-800/60 flex items-center justify-between text-xs font-mono text-slate-300 cursor-pointer transition" onclick="toggleAccordion(this)">
+              <div class="flex items-center space-x-1.5 truncate">
+                <i data-lucide="file-code" class="w-3.5 h-3.5 text-indigo-400 shrink-0"></i>
+                <span class="truncate font-semibold">${f.path}</span>
+              </div>
+              <div class="flex items-center space-x-1 shrink-0">
+                <span class="text-[10px] text-slate-500">${f.symbols.length} sym</span>
+                <i data-lucide="chevron-down" class="w-3.5 h-3.5 text-slate-500 transition-transform"></i>
+              </div>
+            </div>
+            <div class="p-1 space-y-0.5 border-t border-slate-800/40 hidden">
+              ${symbolsHtml || '<div class="text-[10px] text-slate-600 italic px-2 py-1">Không có symbols</div>'}
+            </div>
+          </div>
+        `;
+      }).join('');
+      lucide.createIcons();
+    }
+
+    function toggleAccordion(header) {
+      const body = header.nextElementSibling;
+      const icon = header.querySelector('[data-lucide="chevron-down"]');
+      if (body.classList.contains('hidden')) {
+        body.classList.remove('hidden');
+        if (icon) icon.style.transform = 'rotate(180deg)';
+      } else {
+        body.classList.add('hidden');
+        if (icon) icon.style.transform = 'rotate(0deg)';
+      }
+    }
+
+    function filterTree(q) {
+      const val = q.trim().toLowerCase();
+      if (!val) {
+        renderTree(treeData);
+        return;
+      }
+      const filtered = treeData.filter(f => {
+        if (f.path.toLowerCase().includes(val)) return true;
+        return (f.symbols || []).some(s => s.name.toLowerCase().includes(val) || (s.parent && s.parent.toLowerCase().includes(val)));
+      });
+      renderTree(filtered);
+    }
+
+    function setTargetFile(path) {
+      selectedTargetFile = path;
+      document.getElementById('target-file-name').innerText = path;
+      showToast(`Đã chọn mục tiêu: ${path}`);
+    }
+
+    function clearTargetFile() {
+      selectedTargetFile = null;
+      document.getElementById('target-file-name').innerText = '(Tự động nhận diện từ câu hỏi)';
+    }
+
+    let attachedImages = [];
+
+    function handleImageUpload(event) {
+      const files = event.target.files;
+      if (!files) return;
+      for (const file of files) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          attachedImages.push({ name: file.name, dataUri: e.target.result });
+          renderImagePreviews();
+        };
+        reader.readAsDataURL(file);
+      }
+      event.target.value = '';
+    }
+
+    function renderImagePreviews() {
+      const container = document.getElementById('image-preview-container');
+      const attachText = document.getElementById('btn-attach-text');
+      if (!attachedImages.length) {
+        container.classList.add('hidden');
+        if (attachText) attachText.innerText = 'Thêm Ảnh';
+        container.innerHTML = '';
+        return;
+      }
+      container.classList.remove('hidden');
+      if (attachText) attachText.innerText = `Ảnh (${attachedImages.length})`;
+      container.innerHTML = attachedImages.map((img, idx) => `
+        <div class="border border-slate-700 bg-slate-900 rounded-lg p-1.5 flex items-center space-x-2">
+          <img src="${img.dataUri}" class="w-8 h-8 object-cover rounded" />
+          <span class="text-xs text-slate-300 max-w-[120px] truncate">${img.name}</span>
+          <button onclick="removeAttachedImage(${idx})" class="text-slate-400 hover:text-red-400 p-0.5 text-xs font-bold" title="Xóa ảnh">✕</button>
+        </div>
+      `).join('');
+      lucide.createIcons();
+    }
+
+    function removeAttachedImage(idx) {
+      attachedImages.splice(idx, 1);
+      renderImagePreviews();
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      const textarea = document.getElementById('task-input');
+      if (textarea) {
+        textarea.addEventListener('paste', (e) => {
+          const items = (e.clipboardData || (e.originalEvent && e.originalEvent.clipboardData))?.items || [];
+          for (const item of items) {
+            if (item.kind === 'file' && item.type.startsWith('image/')) {
+              const file = item.getAsFile();
+              const reader = new FileReader();
+              reader.onload = (evt) => {
+                attachedImages.push({ name: `screenshot_${attachedImages.length + 1}.png`, dataUri: evt.target.result });
+                renderImagePreviews();
+              };
+              reader.readAsDataURL(file);
+            }
+          }
+        });
+      }
+    });
+
+    async function handleRescan() {
+      showToast('Đang quét lại codebase...');
+      await fetch('/api/scan', { method: 'POST' });
+      await loadStatus();
+      await loadTree();
+      showToast('Đã cập nhật AST biểu tượng!', 'success');
+    }
+
+    async function handleExecuteGraft() {
+      let task = document.getElementById('task-input').value.trim();
+      if (!task && !attachedImages.length) {
+        showToast('Vui lòng nhập yêu cầu cấy ghép code hoặc đính kèm hình ảnh!', 'error');
+        return;
+      }
+      if (!task && attachedImages.length) {
+        task = "Hãy phân tích hình ảnh đính kèm và thực hiện yêu cầu hoặc giải thích các vấn đề trong ảnh.";
+      }
+
+      const btn = document.getElementById('btn-graft');
+      const spinner = document.getElementById('loading-spinner');
+      btn.disabled = true;
+      spinner.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/api/graft', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            task: task,
+            target_file: selectedTargetFile,
+            images: attachedImages.map(img => img.dataUri)
+          })
+        });
+
+        const data = await res.json();
+        if (!data.success) {
+          showToast(`Lỗi: ${data.error}`, 'error');
+          return;
+        }
+
+        attachedImages = [];
+        renderImagePreviews();
+
+        lastGraftResult = data;
+        renderGraftResult(data);
+
+        // Update token badge
+        const tokens = data.tokens || {};
+        if (tokens.prompt_tokens) {
+          document.getElementById('token-badge-nav').classList.remove('hidden');
+          document.getElementById('token-badge-nav').classList.add('flex');
+          document.getElementById('nav-input-tok').innerText = `Input: ${(tokens.prompt_tokens).toLocaleString()} tok`;
+          document.getElementById('nav-output-tok').innerText = `Output: ${(tokens.completion_tokens || 0).toLocaleString()} tok`;
+        }
+
+        showToast('AI đã hoàn tất tính toán cấy ghép code!', 'success');
+
+        // Check if auto-apply is enabled
+        if (document.getElementById('chk-auto-apply').checked) {
+          for (const act of (data.actions || [])) {
+            if (act.success) {
+              await applyGraftAction(act);
+            }
+          }
+        }
+      } catch (err) {
+        showToast(`Lỗi kết nối: ${err.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+      }
+    }
+
+    function renderGraftResult(data) {
+      const container = document.getElementById('results-container');
+      const actions = data.actions || [];
+
+      let actionsHtml = '';
+      if (actions.length === 0) {
+        actionsHtml = `
+          <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 text-sm text-slate-300">
+            <div class="font-bold mb-2 text-white flex items-center gap-1.5">
+              <i data-lucide="info" class="w-4 h-4 text-cyan-400"></i>
+              Phản hồi từ AI:
+            </div>
+            <div class="whitespace-pre-wrap font-sans leading-relaxed">${data.response || 'Không có mã cấy ghép'}</div>
+          </div>
+        `;
+      } else {
+        actionsHtml = actions.map((act, idx) => {
+          if (!act.success) {
+            return `
+              <div class="p-4 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs">
+                <strong>Thất bại trên ${act.file}:</strong> ${act.error}
+              </div>
+            `;
+          }
+
+          // Format diff lines
+          const diffLines = (act.diff || '').split('\n').map(l => {
+            if (l.startsWith('+') && !l.startsWith('+++')) {
+              return `<div class="diff-add px-2 py-0.5">${escapeHtml(l)}</div>`;
+            } else if (l.startsWith('-') && !l.startsWith('---')) {
+              return `<div class="diff-del px-2 py-0.5">${escapeHtml(l)}</div>`;
+            } else if (l.startsWith('@')) {
+              return `<div class="diff-hunk px-2 py-0.5">${escapeHtml(l)}</div>`;
+            }
+            return `<div class="px-2 py-0.5 text-slate-400">${escapeHtml(l)}</div>`;
+          }).join('');
+
+          return `
+            <div class="border border-slate-800 rounded-2xl overflow-hidden bg-slate-900/60 shadow-xl space-y-3 p-4">
+              <div class="flex items-center justify-between flex-wrap gap-2 border-b border-slate-800 pb-3">
+                <div class="flex items-center space-x-2">
+                  <span class="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono text-xs font-bold">${act.file}</span>
+                  <span class="text-xs text-emerald-400 font-medium">${act.msg}</span>
+                </div>
+
+                <div class="flex items-center space-x-2">
+                  <span class="text-[11px] px-2 py-0.5 rounded font-mono ${act.verified ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-300 border border-rose-500/20'}">
+                    ${act.verified ? '✓ Syntax Valid' : '⚠ Syntax Error'}
+                  </span>
+                  <button
+                    onclick="applyGraftActionAtIndex(${idx})"
+                    id="btn-apply-${idx}"
+                    class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow transition active:scale-95 cursor-pointer"
+                  >
+                    <i data-lucide="check" class="w-3.5 h-3.5"></i>
+                    <span>Áp Dụng Vào File</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Diff Viewer -->
+              <div class="rounded-xl overflow-hidden border border-slate-800/80 bg-slate-950 font-mono text-xs max-h-96 overflow-y-auto">
+                ${diffLines || '<div class="p-3 text-slate-500 italic">Không có thay đổi diff</div>'}
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      container.innerHTML = actionsHtml;
+      lucide.createIcons();
+    }
+
+    async function applyGraftActionAtIndex(idx) {
+      if (!lastGraftResult || !lastGraftResult.actions || !lastGraftResult.actions[idx]) return;
+      const act = lastGraftResult.actions[idx];
+      await applyGraftAction(act, idx);
+    }
+
+    async function applyGraftAction(act, idx = null) {
+      try {
+        const res = await fetch('/api/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: act })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast(`Đã cấy ghép thành công vào ${act.file}!`, 'success');
+          if (idx !== null) {
+            const btn = document.getElementById(`btn-apply-${idx}`);
+            if (btn) {
+              btn.disabled = true;
+              btn.className = "px-3 py-1.5 rounded-lg bg-slate-800 text-slate-500 text-xs font-medium cursor-not-allowed";
+              btn.innerHTML = `<span>✓ Đã lưu</span>`;
+            }
+          }
+          await loadStatus();
+          await loadTree();
+        } else {
+          showToast(`Lỗi: ${data.detail || 'Không thể lưu file'}`, 'error');
+        }
+      } catch (err) {
+        showToast(`Lỗi: ${err.message}`, 'error');
+      }
+    }
+
+    async function handleUndo() {
+      if (!confirm('Bạn có chắc muốn hoàn tác thay đổi cấy ghép gần nhất?')) return;
+      try {
+        const res = await fetch('/api/undo', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          showToast(data.msg, 'success');
+          await loadStatus();
+          await loadTree();
+        } else {
+          showToast(data.msg || 'Không thể hoàn tác', 'error');
+        }
+      } catch (err) {
+        showToast(`Lỗi: ${err.message}`, 'error');
+      }
+    }
+
+    // Config Modal
+    async function openConfigModal() {
+      try {
+        const res = await fetch('/api/config');
+        const cfg = await res.json();
+        document.getElementById('cfg-gateway-url').value = cfg.gateway_url || '';
+        document.getElementById('cfg-api-key').value = cfg.api_key || '';
+        document.getElementById('cfg-model').value = cfg.model || 'gemini-3.8-flash-tiered';
+        document.getElementById('cfg-eval-model').value = cfg.evaluator_model || 'claude-sonnet-4-6';
+        document.getElementById('config-modal').classList.remove('hidden');
+      } catch (e) {
+        showToast('Lỗi nạp config', 'error');
+      }
+    }
+
+    function closeConfigModal() {
+      document.getElementById('config-modal').classList.add('hidden');
+    }
+
+    async function saveConfigModal() {
+      const payload = {
+        gateway_url: document.getElementById('cfg-gateway-url').value.trim(),
+        api_key: document.getElementById('cfg-api-key').value.trim(),
+        model: document.getElementById('cfg-model').value,
+        evaluator_model: document.getElementById('cfg-eval-model').value
+      };
+      try {
+        await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        showToast('Đã lưu cấu hình mới!', 'success');
+        closeConfigModal();
+        await loadStatus();
+      } catch (e) {
+        showToast('Lỗi lưu cấu hình', 'error');
+      }
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    window.addEventListener('DOMContentLoaded', init);
+  </script>
+</body>
+</html>

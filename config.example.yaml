@@ -1,0 +1,14 @@
+# Copy this file to config.yaml for local settings. config.yaml is ignored by Git.
+# Direct Gemini credentials are environment-only; never add GEMINI_API_KEY here.
+provider: gemini
+model: gemini-2.5-flash
+
+# Used only when provider: gateway (legacy compatibility).
+gateway_url: http://localhost:5678/webhook/antigravity-chat
+evaluator_model: claude-sonnet-4-6
+dual_ai_mode: false
+
+# Require an explicit user confirmation before edits or terminal commands.
+auto_apply: false
+thinking: true
+web_search: false

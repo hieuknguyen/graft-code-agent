@@ -1,0 +1,20 @@
+{
+  "id": "conv_fb61028e2cc6",
+  "project_id": "proj_dc94fb3d4f",
+  "title": "Câu hỏi trong hội thoại 2",
+  "created_at": "2026-09-14 14:18:43",
+  "updated_at": "2026-09-14 14:18:43",
+  "messages": [
+    {
+      "role": "system",
+      "text": "Bắt đầu phiên làm việc mới cho dự án <b>vantra-web</b>.<br>• Lịch sử trò chuyện được lưu <b>100% trên máy tính</b> (cục bộ, offline).<br>• Bạn có thể hỏi đáp, kiểm tra dự án (Doctor) hoặc cấy ghép code.",
+      "title": "💬 CUỘC TRÒ CHUYỆN MỚI",
+      "timestamp": "14:18"
+    },
+    {
+      "role": "user",
+      "text": "Câu hỏi trong hội thoại 2",
+      "timestamp": "14:18"
+    }
+  ]
+}

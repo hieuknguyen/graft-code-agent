@@ -1,0 +1,18 @@
+# Local credentials and machine-specific configuration
+config.yaml
+.env
+.env.*
+!.env.example
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# IDE and OS files
+.vscode/
+.idea/
+Thumbs.db
