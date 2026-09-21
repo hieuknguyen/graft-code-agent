@@ -59,7 +59,7 @@ def test_file_symbol_and_diff_keep_agent_visible(window, app):
     assert window.editor.current_file == "src/example.py"
     assert "def greet(name)" in window.editor.code_editor.toPlainText()
     assert window.editor.agent_panel.isVisible()
-    assert window.editor.terminal_view.isVisible()
+    assert not window.editor.terminal_view.isVisible()
     window.sidebar.tree.itemDoubleClicked.emit(symbol, 0)
     assert window.editor.code_editor.textCursor().blockNumber() == 2
 
@@ -89,20 +89,70 @@ def test_compact_layout_navigation_and_options(window, app):
         assert button.isVisible()
         assert window.rect().contains(button.mapTo(window, button.rect().bottomRight()))
     assert not window.prompt.chk_auto.isChecked()
+    window.editor.show_code()
     window.toggle_agent()
-    assert not window.editor.agent_panel.isVisible()
+    assert not window.editor.workspace.isVisible()
     window.focus_agent()
     assert window.editor.agent_panel.isVisible()
     assert window.prompt.prompt_edit.hasFocus()
+    window.toggle_terminal()
+    assert window.editor.terminal_view.isVisible()
     window.toggle_terminal()
     assert not window.editor.terminal_view.isVisible()
     window.editor.show_terminal()
     assert window.editor.terminal_view.isVisible()
     window.show_sidebar_tab(0)
-    assert window.activity_buttons[0].isChecked()
+    assert window.sidebar.tabs.currentIndex() == 0
     window.focus_file_search()
-    assert window.activity_buttons[1].isChecked()
+    assert window.sidebar.tabs.currentIndex() == 1
     assert window.sidebar.file_search.hasFocus()
+
+
+def test_home_composer_centers_then_docks_for_messages(window, app):
+    assert not window.editor.workspace.isVisible()
+    assert not window.editor.terminal_view.isVisible()
+    assert not window.editor.chat_view.isVisible()
+    assert not window.prompt.actions_panel.isVisible()
+    center_y = window.editor.agent_panel.mapTo(window, window.editor.agent_panel.rect().center()).y()
+    prompt_y = window.prompt.mapTo(window, window.prompt.rect().center()).y()
+    assert abs(prompt_y - center_y) < 80
+    window.editor.chat_view.add_user_message("Explain the project", persist=False)
+    app.processEvents()
+    assert window.editor.chat_view.isVisible()
+    assert window.prompt.mapTo(window, window.prompt.rect().center()).y() > center_y + 100
+    window.prompt.btn_apply.setEnabled(True)
+    app.processEvents()
+    assert window.prompt.btn_apply.isVisible()
+    window.prompt.btn_apply.setEnabled(False)
+    window.editor.chat_view.clear_chat()
+    app.processEvents()
+    assert not window.editor.chat_view.isVisible()
+    assert abs(window.prompt.mapTo(window, window.prompt.rect().center()).y() - center_y) < 80
+
+
+def test_grouped_history_opens_conversation_in_its_project(window, app, tmp_path):
+    other = tmp_path / "other-project"
+    other.mkdir()
+    project = window.session_mgr.get_or_create_project(str(other))
+    conversation = window.session_mgr.create_conversation(project["id"], "Review checkout")
+    window.session_mgr.append_message(project["id"], conversation["id"], {
+        "role": "user", "text": "Review the checkout flow"
+    })
+    window.sidebar.reload_projects_list(window.root_dir)
+    tree = window.sidebar.projects_tree
+    project_item = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+                        if tree.topLevelItem(i).text(0) == "other-project")
+    window.sidebar.conv_search.setText("checkout")
+    assert not project_item.isHidden()
+    assert not project_item.child(0).isHidden()
+    with patch.object(window, "do_scan"):
+        tree.itemClicked.emit(project_item.child(0), 0)
+    app.processEvents()
+    assert window.root_dir == str(other)
+    assert window.current_conv_id == conversation["id"]
+    assert "Review the checkout flow" in window.editor.chat_view.browser.toPlainText()
+    assert window.editor.chat_view.isVisible()
+    assert "other-project" in window.workspace_button.text()
 
 
 def test_prompt_keeps_target_images_and_blocks_duplicate_submission(app):

@@ -6,6 +6,12 @@ from PySide6.QtSvg import QSvgRenderer
 
 
 PATHS = {
+    "more": '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
+    "history": '<path d="M3 4v5h5M3 9a9 9 0 1 1 0 6M12 7v5l3 2"/>',
+    "back": '<path d="m10 5-7 7 7 7M3 12h18"/>',
+    "folder_plus": '<path d="M3 6h7l2 2h9v6M3 6v14h10M18 15v7M14.5 18.5h7"/>',
+    "local": '<path d="M4 4h16v12H4zM2 20h20M8 16v4M16 16v4"/>',
+    "arrow_right": '<path d="M4 12h16m-7-7 7 7-7 7"/>',
     "files": '<path d="M9 3h8l4 4v13H9zM17 3v5h4M5 7H3v14h12"/>',
     "folder": '<path d="M3 6h7l2 2h9v12H3z"/>',
     "chat": '<path d="M4 4h16v12H9l-5 4zM8 8h8M8 12h5"/>',

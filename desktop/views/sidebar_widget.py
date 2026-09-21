@@ -1,14 +1,14 @@
 import os
-from pathlib import Path
-from typing import Optional, List, Dict, Any
+from datetime import datetime
+from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QTreeWidget, QTreeWidgetItem, QFileDialog, QComboBox,
-    QTabWidget, QListWidget, QListWidgetItem, QInputDialog, QMessageBox,
-    QMenu, QSizePolicy
+    QLineEdit, QTreeWidget, QTreeWidgetItem, QFileDialog,
+    QStackedWidget, QListWidget, QListWidgetItem, QInputDialog, QMessageBox,
+    QMenu, QHeaderView
 )
 from PySide6.QtCore import Qt, Signal, QPoint
-from PySide6.QtGui import QIcon, QFont, QAction, QColor
+from PySide6.QtGui import QColor
 
 from desktop.icons import icon
 
@@ -17,6 +17,9 @@ from core.session_manager import SessionManager
 
 class SidebarWidget(QWidget):
     project_switched = Signal(str) # folder_path
+    project_conversation_selected = Signal(str, str)
+    settings_requested = Signal()
+    sidebar_toggle_requested = Signal()
     conversation_selected = Signal(str) # conv_id
     new_conversation_requested = Signal()
     rename_conversation_requested = Signal(str, str) # conv_id, new_title
@@ -36,71 +39,122 @@ class SidebarWidget(QWidget):
 
     def init_ui(self):
         self.setObjectName("sidebar")
-        self.setMinimumWidth(210)
-        self.setMaximumWidth(420)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setMinimumWidth(245)
+        self.setMaximumWidth(405)
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 9, 10, 8)
-        main_layout.setSpacing(10)
-        title_row = QHBoxLayout()
-        title = QLabel("WORKSPACE")
-        title.setObjectName("sectionLabel")
-        title_row.addWidget(title)
-        title_row.addStretch()
+        main_layout.setContentsMargins(10, 8, 10, 12)
+        main_layout.setSpacing(6)
+        brand_row = QHBoxLayout()
+        brand_row.setContentsMargins(8, 0, 4, 10)
+        mark = QLabel()
+        mark.setPixmap(icon("spark", "#d1d1d1", 25).pixmap(25, 25))
+        brand_row.addWidget(mark)
+        brand = QLabel("Graft")
+        brand.setObjectName("brand")
+        brand_row.addWidget(brand)
+        brand_row.addStretch()
+        collapse = QPushButton(icon("panel"), "")
+        collapse.setObjectName("iconButton")
+        collapse.setFixedSize(30, 30)
+        collapse.setToolTip("Thu gọn thanh bên")
+        collapse.clicked.connect(self.sidebar_toggle_requested.emit)
+        brand_row.addWidget(collapse)
+        main_layout.addLayout(brand_row)
+
+        self.btn_new_chat = QPushButton(icon("plus"), "Cuộc trò chuyện mới")
+        self.btn_new_chat.setObjectName("newConversation")
+        self.btn_new_chat.setMinimumHeight(40)
+        self.btn_new_chat.clicked.connect(self.new_conversation_requested.emit)
+        main_layout.addWidget(self.btn_new_chat)
+        self.btn_history = QPushButton(icon("history"), "Lịch sử hội thoại")
+        self.btn_history.setObjectName("navButton")
+        self.btn_history.clicked.connect(self.show_history)
+        main_layout.addWidget(self.btn_history)
+        self.btn_explorer = QPushButton(icon("folder"), "Tệp trong dự án")
+        self.btn_explorer.setObjectName("navButton")
+        self.btn_explorer.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
+        main_layout.addWidget(self.btn_explorer)
+        main_layout.addSpacing(18)
+
+        self.tabs = QStackedWidget()
+        home = QWidget()
+        home.setObjectName("sidebarPage")
+        home_layout = QVBoxLayout(home)
+        home_layout.setContentsMargins(0, 0, 0, 0)
+        home_layout.setSpacing(8)
+        self.conv_search = QLineEdit()
+        self.conv_search.setObjectName("sidebarSearch")
+        self.conv_search.setPlaceholderText("Tìm hội thoại hoặc dự án…")
+        self.conv_search.textChanged.connect(self.filter_conversations)
+        self.conv_search.hide()
+        home_layout.addWidget(self.conv_search)
+        recent_label = QLabel("Hội thoại gần đây")
+        recent_label.setObjectName("sectionLabel")
+        home_layout.addWidget(recent_label)
+        self.conv_list = QListWidget()
+        self.conv_list.setObjectName("recentConversations")
+        self.conv_list.setFixedHeight(88)
+        self.conv_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.conv_list.itemClicked.connect(self.on_conv_item_clicked)
+        self.conv_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.conv_list.customContextMenuRequested.connect(self.show_conv_context_menu)
+        home_layout.addWidget(self.conv_list)
+        home_layout.addSpacing(12)
+        projects_header = QHBoxLayout()
+        projects_label = QLabel("Dự án")
+        projects_label.setObjectName("sectionLabel")
+        projects_header.addWidget(projects_label)
+        projects_header.addStretch()
+        self.btn_import = QPushButton(icon("folder_plus"), "")
+        self.btn_import.setObjectName("iconButton")
+        self.btn_import.setFixedSize(28, 28)
+        self.btn_import.setToolTip("Mở thư mục dự án (Ctrl+O)")
+        self.btn_import.setAccessibleName("Mở thư mục dự án")
+        self.btn_import.clicked.connect(self.browse_folder)
+        projects_header.addWidget(self.btn_import)
+        home_layout.addLayout(projects_header)
+        self.projects_tree = QTreeWidget()
+        self.projects_tree.setObjectName("projectTree")
+        self.projects_tree.setHeaderHidden(True)
+        self.projects_tree.setColumnCount(2)
+        self.projects_tree.setRootIsDecorated(False)
+        self.projects_tree.setIndentation(20)
+        self.projects_tree.setUniformRowHeights(True)
+        self.projects_tree.header().setStretchLastSection(False)
+        self.projects_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.projects_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.projects_tree.setColumnWidth(1, 52)
+        self.projects_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.projects_tree.itemClicked.connect(self.on_project_item_clicked)
+        self.projects_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.projects_tree.customContextMenuRequested.connect(self.show_project_context_menu)
+        home_layout.addWidget(self.projects_tree, 1)
+        self.tabs.addWidget(home)
+
+        tab_files = QWidget()
+        tab_files.setObjectName("sidebarPage")
+        files_layout = QVBoxLayout(tab_files)
+        files_layout.setContentsMargins(0, 0, 0, 0)
+        files_layout.setSpacing(8)
+        explorer_header = QHBoxLayout()
+        back = QPushButton(icon("back"), "Dự án")
+        back.setObjectName("iconButton")
+        back.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
+        explorer_header.addWidget(back)
+        explorer_header.addStretch()
         for attr, name, tooltip, signal in (
             ("btn_rescan", "refresh", "Quét lại codebase (F5)", self.rescan_requested),
             ("btn_doctor", "activity", "Kiểm tra môi trường (F6)", self.doctor_requested),
         ):
             button = QPushButton(icon(name), "")
             button.setObjectName("iconButton")
-            button.setFixedSize(26, 26)
+            button.setFixedSize(28, 28)
             button.setToolTip(tooltip)
-            button.setAccessibleName(tooltip)
             button.clicked.connect(signal.emit)
             setattr(self, attr, button)
-            title_row.addWidget(button)
-        main_layout.addLayout(title_row)
-        self.project_combo = QComboBox()
-        self.project_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.project_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.project_combo.setMinimumContentsLength(10)
-        self.project_combo.setToolTip("Chọn dự án làm việc")
-        self.project_combo.currentIndexChanged.connect(self.on_project_combo_changed)
-        main_layout.addWidget(self.project_combo)
-        self.btn_import = QPushButton(icon("folder"), "Mở thư mục…")
-        self.btn_import.setToolTip("Mở dự án từ máy tính (Ctrl+O)")
-        self.btn_import.clicked.connect(self.browse_folder)
-        main_layout.addWidget(self.btn_import)
-
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.tabBar().setDrawBase(False)
-        tab_convs = QWidget()
-        conv_layout = QVBoxLayout(tab_convs)
-        conv_layout.setContentsMargins(0, 10, 0, 0)
-        conv_layout.setSpacing(8)
-        self.btn_new_chat = QPushButton(icon("plus"), "Cuộc trò chuyện mới")
-        self.btn_new_chat.clicked.connect(self.new_conversation_requested.emit)
-        conv_layout.addWidget(self.btn_new_chat)
-        self.conv_search = QLineEdit()
-        self.conv_search.setObjectName("sidebarSearch")
-        self.conv_search.setPlaceholderText("Tìm cuộc trò chuyện…")
-        self.conv_search.textChanged.connect(self.filter_conversations)
-        conv_layout.addWidget(self.conv_search)
-        self.conv_list = QListWidget()
-        self.conv_list.setWordWrap(True)
-        self.conv_list.itemClicked.connect(self.on_conv_item_clicked)
-        self.conv_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.conv_list.customContextMenuRequested.connect(self.show_conv_context_menu)
-        conv_layout.addWidget(self.conv_list)
-        self.lbl_storage_info = QLabel("Lịch sử được lưu trên máy")
-        self.lbl_storage_info.setObjectName("muted")
-        conv_layout.addWidget(self.lbl_storage_info)
-        self.tabs.addTab(tab_convs, "Lịch sử")
-
-        tab_files = QWidget()
-        files_layout = QVBoxLayout(tab_files)
-        files_layout.setContentsMargins(0, 10, 0, 0)
-        files_layout.setSpacing(8)
+            explorer_header.addWidget(button)
+        files_layout.addLayout(explorer_header)
         self.file_search = QLineEdit()
         self.file_search.setObjectName("sidebarSearch")
         self.file_search.setPlaceholderText("Tìm tệp, hàm, class…")
@@ -118,36 +172,74 @@ class SidebarWidget(QWidget):
         self.lbl_stats = QLabel("Chưa lập chỉ mục")
         self.lbl_stats.setObjectName("muted")
         files_layout.addWidget(self.lbl_stats)
-        self.tabs.addTab(tab_files, "Explorer")
-        self.tabs.setCurrentIndex(1)
-        main_layout.addWidget(self.tabs)
+        self.tabs.addWidget(tab_files)
+        main_layout.addWidget(self.tabs, 1)
+        settings = QPushButton(icon("settings"), "Cài đặt")
+        settings.setObjectName("navButton")
+        settings.clicked.connect(self.settings_requested.emit)
+        main_layout.addWidget(settings)
+        self.reload_projects_list(str(self.agent.root_dir))
 
-    # ==================== PROJECT ACTIONS ====================
+    def show_history(self):
+        self.tabs.setCurrentIndex(0)
+        self.conv_search.show()
+        self.conv_search.setFocus()
 
     def reload_projects_list(self, active_path: str):
-        """Nạp lại danh sách dự án vào combobox và chọn active_path."""
-        self.project_combo.blockSignals(True)
-        self.project_combo.clear()
+        self.active_path = os.path.abspath(active_path)
+        self.reload_project_tree()
 
-        projects = self.session_mgr.get_projects()
-        current_idx = 0
+    @staticmethod
+    def relative_time(value):
+        try:
+            seconds = max(0, int((datetime.now() - datetime.strptime(value, "%Y-%m-%d %H:%M:%S")).total_seconds()))
+        except (ValueError, TypeError):
+            return ""
+        if seconds < 60:
+            return "0p"
+        if seconds < 3600:
+            return f"{seconds // 60}p"
+        if seconds < 86400:
+            return f"{seconds // 3600}g"
+        return f"{seconds // 86400}n"
 
-        abs_active = os.path.abspath(active_path)
-        for i, p in enumerate(projects):
-            p_path = p.get("path", "")
-            p_name = p.get("name", "Project")
-            self.project_combo.addItem(icon("folder"), p_name, p_path)
-            self.project_combo.setItemData(i, p_path, Qt.ItemDataRole.ToolTipRole)
-            if os.path.abspath(p_path) == abs_active:
-                current_idx = i
+    def reload_project_tree(self):
+        self.projects_tree.clear()
+        for project in self.session_mgr.get_projects():
+            folder = QTreeWidgetItem(self.projects_tree, [project["name"], ""])
+            folder.setIcon(0, icon("folder", "#777777"))
+            folder.setToolTip(0, project["path"])
+            folder.setData(0, Qt.ItemDataRole.UserRole, {"type": "project", "path": project["path"]})
+            active = os.path.abspath(project["path"]) == self.active_path
+            folder.setForeground(0, QColor("#bfbfbf" if active else "#858585"))
+            folder.setExpanded(True)
+            for conv in self.session_mgr.get_conversations(project["id"]):
+                if conv["message_count"] == 0 and conv["title"] == "Cuộc trò chuyện mới":
+                    continue
+                item = QTreeWidgetItem(folder, [conv["title"], self.relative_time(conv["updated_at"])])
+                item.setToolTip(0, conv["title"])
+                item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                item.setForeground(1, QColor("#737373"))
+                item.setData(0, Qt.ItemDataRole.UserRole, {
+                    "type": "conversation", "path": project["path"], "id": conv["id"], "title": conv["title"]
+                })
+                if active and conv["id"] == self.current_conv_id:
+                    self.projects_tree.setCurrentItem(item)
 
-        self.project_combo.setCurrentIndex(current_idx)
-        self.project_combo.blockSignals(False)
+    def on_project_item_clicked(self, item, column):
+        data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        if data.get("type") == "conversation":
+            self.project_conversation_selected.emit(data["path"], data["id"])
+        elif data.get("type") == "project" and os.path.abspath(data["path"]) != self.active_path:
+            self.project_switched.emit(data["path"])
 
-    def on_project_combo_changed(self, index: int):
-        folder = self.project_combo.itemData(index)
-        if folder and str(self.agent.root_dir) != folder:
-            self.project_switched.emit(folder)
+    def show_project_context_menu(self, pos):
+        item = self.projects_tree.itemAt(pos)
+        data = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+        if data and data.get("type") == "conversation":
+            # Switching first keeps rename/delete routed to the conversation's project.
+            self.project_conversation_selected.emit(data["path"], data["id"])
+            self.conversation_menu(data, self.projects_tree.mapToGlobal(pos))
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(
@@ -167,20 +259,18 @@ class SidebarWidget(QWidget):
 
         selected_item = None
         for c in convs:
+            if c["message_count"] == 0 and c["title"] == "Cuộc trò chuyện mới":
+                continue
             c_id = c["id"]
             title = c.get("title", "Cuộc trò chuyện mới")
-            updated_at = c.get("updated_at", "")
-            time_str = updated_at[11:16] if len(updated_at) >= 16 else ""
-            date_str = updated_at[5:10] if len(updated_at) >= 10 else ""
-
             item = QListWidgetItem(self.conv_list)
-            item.setText(f"{title}\n{date_str} · {time_str} · {c.get('message_count', 0)} tin nhắn")
+            item.setText(title)
             item.setToolTip(title)
             item.setData(Qt.ItemDataRole.UserRole, c)
 
             if select_conv_id and c_id == select_conv_id:
                 selected_item = item
-            elif selected_item is None:
+            elif selected_item is None and select_conv_id is None:
                 selected_item = item
 
         if selected_item:
@@ -188,7 +278,8 @@ class SidebarWidget(QWidget):
             c_data = selected_item.data(Qt.ItemDataRole.UserRole)
             self.current_conv_id = c_data["id"]
         else:
-            self.current_conv_id = None
+            self.current_conv_id = select_conv_id
+        self.reload_project_tree()
         self.filter_conversations(self.conv_search.text())
 
     def on_conv_item_clicked(self, item: QListWidgetItem):
@@ -197,6 +288,7 @@ class SidebarWidget(QWidget):
             c_id = c_data["id"]
             self.current_conv_id = c_id
             self.conversation_selected.emit(c_id)
+            self.reload_project_tree()
 
     def filter_conversations(self, query: str):
         q = query.strip().lower()
@@ -205,6 +297,16 @@ class SidebarWidget(QWidget):
             c_data = item.data(Qt.ItemDataRole.UserRole)
             title = c_data.get("title", "").lower() if c_data else ""
             item.setHidden(bool(q and q not in title))
+        for i in range(self.projects_tree.topLevelItemCount()):
+            project = self.projects_tree.topLevelItem(i)
+            project_matches = not q or q in project.text(0).lower()
+            visible = project_matches
+            for j in range(project.childCount()):
+                conversation = project.child(j)
+                matches = project_matches or q in conversation.text(0).lower()
+                conversation.setHidden(not matches)
+                visible = visible or matches
+            project.setHidden(not visible)
 
     def show_conv_context_menu(self, pos: QPoint):
         item = self.conv_list.itemAt(pos)
@@ -212,6 +314,9 @@ class SidebarWidget(QWidget):
             return
 
         c_data = item.data(Qt.ItemDataRole.UserRole)
+        self.conversation_menu(c_data, self.conv_list.mapToGlobal(pos))
+
+    def conversation_menu(self, c_data, global_pos):
         c_id = c_data["id"]
         c_title = c_data.get("title", "Cuộc trò chuyện")
 
@@ -219,7 +324,7 @@ class SidebarWidget(QWidget):
         act_rename = menu.addAction("✏️ Đổi Tên Hội Thoại")
         act_delete = menu.addAction("🗑️ Xóa Hội Thoại Này")
 
-        action = menu.exec(self.conv_list.mapToGlobal(pos))
+        action = menu.exec(global_pos)
         if action == act_rename:
             new_title, ok = QInputDialog.getText(
                 self, "Đổi Tên Cuộc Trò Chuyện", "Nhập tiêu đề mới:", text=c_title

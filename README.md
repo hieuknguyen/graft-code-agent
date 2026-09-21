@@ -35,9 +35,11 @@ python run.py --cli --dir "C:\duong-dan\toi\du-an"
 
 Hãy chọn đúng thư mục gốc của dự án. Đường dẫn và tệp ngoài workspace không nên được coi là một phần ngữ cảnh hay phạm vi thao tác của agent.
 
-## Giao diện desktop kiểu IDE
+## Giao diện desktop theo mẫu Antigravity
 
-Ứng dụng desktop PySide6 có giao diện ba vùng giống IDE: activity bar và cây tệp bên trái, editor/diff/terminal ở giữa, agent panel ở bên phải. Cách bố trí này lấy cảm hứng từ Google Antigravity nhưng vẫn giữ workflow an toàn của Graft: agent chỉ đề xuất diff, tạo file, xóa file hoặc lệnh terminal; bạn vẫn xác nhận trước khi áp dụng.
+Ứng dụng desktop PySide6 dùng bố cục hội thoại theo ảnh mẫu Antigravity: danh sách dự án và hội thoại ở thanh bên trái, ô nhập lớn ở giữa màn hình và bộ chọn dự án ngay phía trên. Khi có tin nhắn, ô nhập chuyển xuống dưới cuộc trò chuyện. Model, đính kèm ảnh và tùy chọn nằm trong khung nhập; các nút áp dụng/hoàn tác xuất hiện khi có thay đổi để xử lý.
+
+Nhấn **Mở mã nguồn** hoặc `Ctrl+P` để mở Explorer và khung code/diff, dùng `Ctrl+J` để mở terminal. Hội thoại được nhóm theo dự án; chọn một hội thoại sẽ mở đúng thư mục và lịch sử tương ứng. Agent tiếp tục đề xuất thay đổi để bạn xem và xác nhận trước khi áp dụng.
 
 ```powershell
 python desktop_app.py --dir "C:\duong-dan\toi\du-an"
@@ -51,7 +53,8 @@ Phím tắt hữu ích:
 | `Ctrl+Enter` | Gửi yêu cầu hiện tại |
 | `Ctrl+P` | Focus tìm file/symbol |
 | `Ctrl+J` | Ẩn/hiện terminal |
-| `Alt+A` | Ẩn/hiện agent panel |
+| `Ctrl+Alt+A` | Quay lại hội thoại, đóng khung mã nguồn |
+| `Ctrl+B` | Ẩn/hiện thanh bên |
 | `Ctrl+N` | Bắt đầu cuộc trò chuyện mới |
 
 ## Quy tắc an toàn của coding agent

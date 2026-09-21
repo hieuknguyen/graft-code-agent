@@ -2,9 +2,8 @@ import os
 import re
 from pathlib import Path
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QMessageBox, QStatusBar, QFileDialog, QMenuBar, QMenu,
-    QLabel, QPushButton, QFrame, QButtonGroup
+    QMainWindow, QWidget, QHBoxLayout, QSplitter,
+    QMessageBox, QStatusBar, QMenu, QLabel
 )
 from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QAction
@@ -60,76 +59,9 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         central_widget = QWidget()
         central_widget.setObjectName("workbench")
-        main_layout = QVBoxLayout(central_widget)
+        main_layout = QHBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        command_bar = QFrame()
-        command_bar.setObjectName("commandBar")
-        command_bar.setFixedHeight(42)
-        bar_layout = QHBoxLayout(command_bar)
-        bar_layout.setContentsMargins(15, 5, 12, 5)
-        mark = QLabel()
-        mark.setPixmap(icon("spark", "#aecbfa", 21).pixmap(21, 21))
-        bar_layout.addWidget(mark)
-        brand = QLabel("Graft")
-        brand.setObjectName("brand")
-        bar_layout.addWidget(brand)
-        bar_layout.addStretch()
-        self.workspace_button = QPushButton(icon("search"), "")
-        self.workspace_button.setObjectName("commandSearch")
-        self.workspace_button.setMinimumWidth(260)
-        self.workspace_button.setMaximumWidth(480)
-        self.workspace_button.clicked.connect(self.focus_file_search)
-        bar_layout.addWidget(self.workspace_button, 3)
-        bar_layout.addStretch()
-        self.agent_toggle = QPushButton(icon("panel"), "Agent")
-        self.agent_toggle.setToolTip("Hiện / ẩn khung Agent (Ctrl+Alt+A)")
-        self.agent_toggle.clicked.connect(self.toggle_agent)
-        bar_layout.addWidget(self.agent_toggle)
-        main_layout.addWidget(command_bar)
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
-        rail = QWidget()
-        rail.setObjectName("activityBar")
-        rail.setFixedWidth(48)
-        rail_layout = QVBoxLayout(rail)
-        rail_layout.setContentsMargins(0, 5, 0, 6)
-        rail_layout.setSpacing(4)
-        self.navigation = QButtonGroup(self)
-        self.navigation.setExclusive(True)
-        self.activity_buttons = {}
-        for name, label, index in (("files", "Explorer", 1), ("chat", "Lịch sử trò chuyện", 0)):
-            button = QPushButton(icon(name), "")
-            button.setObjectName("activityButton")
-            button.setFixedSize(47, 42)
-            button.setCheckable(True)
-            button.setToolTip(label)
-            button.setAccessibleName(label)
-            button.clicked.connect(lambda checked=False, tab=index: self.show_sidebar_tab(tab))
-            self.navigation.addButton(button, index)
-            self.activity_buttons[index] = button
-            rail_layout.addWidget(button)
-        for name, label, callback in (
-            ("search", "Tìm tệp (Ctrl+P)", self.focus_file_search),
-            ("terminal", "Terminal (Ctrl+J)", self.toggle_terminal),
-        ):
-            button = QPushButton(icon(name), "")
-            button.setObjectName("activityButton")
-            button.setFixedSize(47, 42)
-            button.setToolTip(label)
-            button.setAccessibleName(label)
-            button.clicked.connect(callback)
-            rail_layout.addWidget(button)
-        rail_layout.addStretch()
-        settings_button = QPushButton(icon("settings"), "")
-        settings_button.setObjectName("activityButton")
-        settings_button.setFixedSize(47, 42)
-        settings_button.setToolTip("Cài đặt AI")
-        settings_button.setAccessibleName("Cài đặt AI")
-        settings_button.clicked.connect(self.open_settings)
-        rail_layout.addWidget(settings_button)
-        body.addWidget(rail)
         self.h_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.h_splitter.setChildrenCollapsible(False)
         self.h_splitter.setHandleWidth(1)
@@ -143,7 +75,6 @@ class MainWindow(QMainWindow):
         self.sidebar.symbol_selected.connect(self.on_symbol_selected)
         self.sidebar.rescan_requested.connect(lambda: self.do_scan(welcome=False))
         self.sidebar.doctor_requested.connect(self.run_doctor)
-        self.sidebar.tabs.currentChanged.connect(self.sync_navigation)
         self.h_splitter.addWidget(self.sidebar)
         self.editor = EditorWidget(self)
         self.editor.chat_view.action_apply_clicked.connect(self.on_chat_apply_clicked)
@@ -172,26 +103,32 @@ class MainWindow(QMainWindow):
         self.editor.focus_agent_requested.connect(self.focus_agent)
         self.editor.new_conversation_requested.connect(self.on_new_conversation_requested)
         self.editor.history_requested.connect(lambda: self.show_sidebar_tab(0))
+        self.sidebar.project_conversation_selected.connect(self.open_project_conversation)
+        self.sidebar.settings_requested.connect(self.open_settings)
+        self.sidebar.sidebar_toggle_requested.connect(self.toggle_sidebar)
+        self.editor.sidebar_toggle_requested.connect(self.toggle_sidebar)
+        self.workspace_button = self.editor.project_button
+        self.workspace_button.clicked.connect(self.show_project_menu)
         self.h_splitter.addWidget(self.editor)
-        self.h_splitter.setSizes([245, 1067])
-        self.h_splitter.setStretchFactor(0, 0)
+        self.h_splitter.setSizes([300, 1060])
+        self.h_splitter.setStretchFactor(0, 1)
         self.h_splitter.setStretchFactor(1, 1)
-        body.addWidget(self.h_splitter, 1)
-        main_layout.addLayout(body, 1)
+        main_layout.addWidget(self.h_splitter)
         self.setCentralWidget(central_widget)
-        self.sync_navigation(1)
         self.update_workspace_header()
-
-    def sync_navigation(self, index):
-        self.activity_buttons[index].setChecked(True)
 
     def show_sidebar_tab(self, index):
         self.sidebar.show()
+        self.editor.sidebar_toggle_button.hide()
         self.sidebar.tabs.setCurrentIndex(index)
-        self.sync_navigation(index)
+
+    def toggle_sidebar(self):
+        self.sidebar.setVisible(not self.sidebar.isVisible())
+        self.editor.sidebar_toggle_button.setVisible(not self.sidebar.isVisible())
 
     def focus_file_search(self):
         self.show_sidebar_tab(1)
+        self.editor.show_code()
         self.sidebar.file_search.setFocus()
         self.sidebar.file_search.selectAll()
 
@@ -200,16 +137,37 @@ class MainWindow(QMainWindow):
         self.prompt.prompt_edit.setFocus()
 
     def toggle_agent(self):
-        self.editor.agent_panel.setVisible(not self.editor.agent_panel.isVisible())
+        self.editor.workspace.hide()
+        self.focus_agent()
 
     def toggle_terminal(self):
-        self.editor.terminal_view.setVisible(not self.editor.terminal_view.isVisible())
+        self.editor.toggle_terminal()
 
     def update_workspace_header(self):
         name = self.current_project["name"]
-        self.workspace_button.setText(f"{name}     ·     Ctrl+P")
+        self.workspace_button.setText(f"{name}  ⌄")
         self.workspace_button.setToolTip(self.root_dir)
         self.setWindowTitle(f"{name} — Graft")
+
+    def show_project_menu(self):
+        menu = QMenu(self)
+        for project in self.session_mgr.get_projects():
+            action = menu.addAction(icon("folder"), project["name"])
+            action.setToolTip(project["path"])
+            action.setCheckable(True)
+            action.setChecked(os.path.abspath(project["path"]) == self.root_dir)
+            action.triggered.connect(lambda checked=False, path=project["path"]: self.switch_workspace(path))
+        menu.addSeparator()
+        menu.addAction(icon("folder_plus"), "Mở thư mục…", self.sidebar.browse_folder)
+        menu.exec(self.workspace_button.mapToGlobal(self.workspace_button.rect().bottomLeft()))
+
+    def open_project_conversation(self, folder_path, conv_id):
+        folder_path = os.path.abspath(folder_path)
+        if folder_path != self.root_dir:
+            self.switch_workspace(folder_path)
+        if folder_path == self.root_dir:
+            self.on_conversation_selected(conv_id)
+            self.sidebar.reload_conversations(self.current_project["id"], select_conv_id=conv_id)
 
     def init_menu(self):
         menubar = self.menuBar()
@@ -247,9 +205,10 @@ class MainWindow(QMainWindow):
         for text, shortcut, callback in (
             ("Tìm tệp", "Ctrl+P", self.focus_file_search),
             ("Tập trung vào Agent", "Ctrl+L", self.focus_agent),
-            ("Hiện / ẩn Agent", "Ctrl+Alt+A", self.toggle_agent),
+            ("Quay lại hội thoại", "Ctrl+Alt+A", self.toggle_agent),
             ("Hiện / ẩn Terminal", "Ctrl+J", self.toggle_terminal),
             ("Cuộc trò chuyện mới", "Ctrl+N", self.on_new_conversation_requested),
+            ("Hiện / ẩn thanh bên", "Ctrl+B", self.toggle_sidebar),
         ):
             action = QAction(text, self)
             action.setShortcut(shortcut)
@@ -265,6 +224,7 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.status.setSizeGripEnabled(False)
+        self.status.hide()
         encoding = QLabel("UTF-8    ·    Graft")
         encoding.setObjectName("muted")
         self.status.addPermanentWidget(encoding)
@@ -286,12 +246,17 @@ class MainWindow(QMainWindow):
         conv = self.session_mgr.get_conversation(self.current_project["id"], conv_id)
         if conv:
             self.editor.chat_view.load_messages(conv.get("messages", []))
+            self.editor.workspace.hide()
+            self.focus_agent()
             self.status.showMessage(f"Hội thoại: {conv.get('title', '')} | Dự án: {self.current_project['name']}")
 
     def on_new_conversation_requested(self):
         conv = self.session_mgr.create_conversation(self.current_project["id"], title="Cuộc trò chuyện mới")
         self.current_conv_id = conv["id"]
         self.editor.chat_view.clear_chat()
+        self.editor.workspace.hide()
+        self.editor.terminal_view.hide()
+        self.show_sidebar_tab(0)
         self.sidebar.reload_conversations(self.current_project["id"], select_conv_id=self.current_conv_id)
         self.focus_agent()
         self.status.showMessage("Đã tạo cuộc trò chuyện mới.")
@@ -335,11 +300,15 @@ class MainWindow(QMainWindow):
         self.sidebar.lbl_stats.setText("Đang quét dự án…")
         self.prompt.update_file_list([])
         self.prompt.btn_undo.setEnabled(False)
+        self.prompt.btn_apply.setEnabled(False)
+        self.last_actions = []
+        self.pending_creates = []
         self.update_workspace_header()
         self.editor.current_file = None
         self.editor.code_editor.clear()
         self.editor.set_diff("")
         self.editor.pages.setCurrentIndex(0)
+        self.editor.workspace.hide()
 
         self.sidebar.reload_projects_list(self.root_dir)
         convs = self.session_mgr.get_conversations(self.current_project["id"])
