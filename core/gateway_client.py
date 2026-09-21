@@ -15,7 +15,7 @@ class GatewayClient:
 
         full_prompt = prompt
         if system_prompt:
-            full_prompt = f"{system_prompt}\n\n[YÊU CẦU NGƯỜI DÙNG]:\n{prompt}"
+            full_prompt = f"{system_prompt}\n\n[TASK AND PROJECT CONTEXT]:\n{prompt}"
 
         payload = {
             "prompt": full_prompt,

@@ -8,6 +8,7 @@ before it can change the machine.
 
 from __future__ import annotations
 
+import base64
 import difflib
 import fnmatch
 import hashlib
@@ -16,6 +17,8 @@ import os
 import re
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
@@ -684,6 +687,137 @@ class ToolRuntime:
             output_tail=self.redact_text(output[-2000:]),
         )
 
+    @staticmethod
+    def _decode_bing_url(href: str) -> str:
+        if "u=a1" in href:
+            try:
+                m = re.search(r'u=a1([a-zA-Z0-9_\-]+)', href)
+                if m:
+                    raw = m.group(1) + "==="
+                    return base64.urlsafe_b64decode(raw[:len(raw) - len(raw) % 4]).decode('utf-8', errors='ignore')
+            except Exception:
+                pass
+        return href
+
+    @staticmethod
+    def _decode_ddg_url(href: str) -> str:
+        if "uddg=" in href:
+            try:
+                parsed = urllib.parse.urlparse(href)
+                qs = urllib.parse.parse_qs(parsed.query)
+                target = qs.get("uddg", [None])[0]
+                if target:
+                    return target
+            except Exception:
+                pass
+        return href
+
+    def web_search(self, query: str, max_results: int = 5) -> ToolResult:
+        """Tìm kiếm thông tin trên internet qua DuckDuckGo HTML / Bing / DuckDuckGo API."""
+        cleaned_query = (query or "").strip()
+        if not cleaned_query:
+            return ToolResult(False, error="Từ khóa tìm kiếm không được để trống.", error_code="EMPTY_QUERY")
+
+        limit = max(1, min(int(max_results or 5), 10))
+        results: List[Dict[str, str]] = []
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+
+        # 1. Ưu tiên tìm kiếm qua DuckDuckGo HTML
+        try:
+            from bs4 import BeautifulSoup
+            ddg_html_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(cleaned_query)}"
+            req = urllib.request.Request(ddg_html_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                soup = BeautifulSoup(resp.read(), "html.parser")
+                for res in soup.find_all("div", class_="result"):
+                    a_tag = res.find("a", class_="result__a") or res.find("a", class_="result__url")
+                    snip_tag = res.find("a", class_="result__snippet") or res.find("div", class_="result__snippet")
+                    if a_tag:
+                        title = a_tag.text.strip()
+                        raw_link = a_tag.get("href", "")
+                        link = self._decode_ddg_url(raw_link)
+                        snippet = snip_tag.text.strip() if snip_tag else ""
+                        if title and link:
+                            results.append({
+                                "title": title,
+                                "snippet": snippet,
+                                "url": link
+                            })
+                            if len(results) >= limit:
+                                break
+        except Exception:
+            pass
+
+        # 2. Fallback: Tìm kiếm qua Bing HTML nếu DuckDuckGo HTML không trả về kết quả
+        if not results:
+            try:
+                from bs4 import BeautifulSoup
+                url = f"https://www.bing.com/search?q={urllib.parse.quote_plus(cleaned_query)}&mkt=vi-VN&setlang=vi"
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    soup = BeautifulSoup(resp.read(), "html.parser")
+                    for li in soup.find_all("li", class_="b_algo"):
+                        h2 = li.find("h2")
+                        if not h2:
+                            continue
+                        a_tag = h2.find("a")
+                        if not a_tag:
+                            continue
+                        title = h2.text.strip()
+                        raw_link = a_tag.get("href", "")
+                        link = self._decode_bing_url(raw_link)
+                        p_tag = li.find("p")
+                        snippet = p_tag.text.strip() if p_tag else ""
+                        if title and link:
+                            results.append({
+                                "title": title,
+                                "snippet": snippet,
+                                "url": link
+                            })
+                            if len(results) >= limit:
+                                break
+            except Exception:
+                pass
+
+        # 3. Fallback: DuckDuckGo instant API nếu cả DDG HTML và Bing đều không có kết quả
+        if not results:
+            try:
+                ddg_url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(cleaned_query)}&format=json"
+                req = urllib.request.Request(ddg_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    ddg_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    abstract = ddg_data.get("AbstractText", "").strip()
+                    source_url = ddg_data.get("AbstractURL", "")
+                    heading = ddg_data.get("Heading", cleaned_query)
+                    if abstract:
+                        results.append({
+                            "title": heading,
+                            "snippet": abstract,
+                            "url": source_url or "https://duckduckgo.com"
+                        })
+                    for topic in ddg_data.get("RelatedTopics", []):
+                        if isinstance(topic, dict) and "Text" in topic:
+                            results.append({
+                                "title": topic.get("FirstURL", "").split("/")[-1].replace("_", " ") or heading,
+                                "snippet": topic.get("Text", ""),
+                                "url": topic.get("FirstURL", "")
+                            })
+                            if len(results) >= limit:
+                                break
+            except Exception:
+                pass
+
+        self._audit("web_search", query=cleaned_query, count=len(results))
+        return ToolResult(True, {
+            "query": cleaned_query,
+            "results": results,
+            "count": len(results)
+        })
+
     def dispatch(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """The sole callable surface exposed to Gemini function calling."""
         handlers = {
@@ -695,6 +829,7 @@ class ToolRuntime:
             "propose_delete_file": lambda: self.propose_delete_file(**arguments),
             "propose_run_command": lambda: self.propose_run_command(**arguments),
             "propose_powershell": lambda: self.propose_powershell(**arguments),
+            "web_search": lambda: self.web_search(**arguments),
         }
         if name not in handlers:
             return ToolResult(False, error="Tool không được phép.", error_code="TOOL_DENIED").as_dict()

@@ -40,7 +40,8 @@ class MainWindow(QMainWindow):
         self.pending_creates = []
         self.feedback_loop_active = False
         self.feedback_loop_count = 0
-        self.max_feedback_loops = 6
+        self.max_feedback_loops = getattr(self.config, "max_feedback_loops", 0)
+        self.command_queue = []
         self.loop_goal = ""
 
         self.process_runner = ProcessRunner(self)
@@ -71,6 +72,7 @@ class MainWindow(QMainWindow):
         self.sidebar.new_conversation_requested.connect(self.on_new_conversation_requested)
         self.sidebar.rename_conversation_requested.connect(self.on_rename_conversation_requested)
         self.sidebar.delete_conversation_requested.connect(self.on_delete_conversation_requested)
+        self.sidebar.delete_project_requested.connect(self.on_delete_project_requested)
         self.sidebar.file_selected.connect(self.on_file_selected)
         self.sidebar.symbol_selected.connect(self.on_symbol_selected)
         self.sidebar.rescan_requested.connect(lambda: self.do_scan(welcome=False))
@@ -83,6 +85,8 @@ class MainWindow(QMainWindow):
         self.editor.chat_view.action_create_file_clicked.connect(self.create_file_requested)
         self.editor.chat_view.action_delete_file_clicked.connect(self.delete_file_requested)
         self.editor.chat_view.message_persisted.connect(self.on_message_persisted)
+        self.editor.chat_view.message_deleted.connect(self.on_message_deleted)
+        self.editor.chat_view.messages_cleared.connect(self.on_messages_cleared)
 
         self.editor.terminal_view.run_requested.connect(self.run_terminal_command)
         self.editor.terminal_view.kill_requested.connect(self.on_stop_process_requested)
@@ -97,6 +101,7 @@ class MainWindow(QMainWindow):
         self.prompt.chk_thinking.setChecked(self.config.thinking)
         self.prompt.chk_dual.setChecked(self.config.dual_ai_mode)
         self.prompt.chk_auto.setChecked(self.config.auto_apply)
+        self.prompt.chk_web.setChecked(getattr(self.config, "web_search", True))
         self.editor.set_prompt(self.prompt)
         self.editor.open_folder_requested.connect(self.sidebar.browse_folder)
         self.editor.search_requested.connect(self.focus_file_search)
@@ -159,6 +164,7 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda checked=False, path=project["path"]: self.switch_workspace(path))
         menu.addSeparator()
         menu.addAction(icon("folder_plus"), "Mở thư mục…", self.sidebar.browse_folder)
+        menu.addAction(icon("trash"), "🗑️ Xóa dự án hiện tại khỏi danh sách…", self.confirm_delete_current_project)
         menu.exec(self.workspace_button.mapToGlobal(self.workspace_button.rect().bottomLeft()))
 
     def open_project_conversation(self, folder_path, conv_id):
@@ -188,6 +194,16 @@ class MainWindow(QMainWindow):
         act_doctor.setShortcut("F6")
         act_doctor.triggered.connect(self.run_doctor)
         file_menu.addAction(act_doctor)
+
+        file_menu.addSeparator()
+
+        act_del_conv = QAction(icon("trash"), "Xóa cuộc trò chuyện hiện tại…", self)
+        act_del_conv.triggered.connect(self.confirm_delete_current_conversation)
+        file_menu.addAction(act_del_conv)
+
+        act_del_proj = QAction(icon("trash"), "Xóa dự án hiện tại khỏi danh sách…", self)
+        act_del_proj.triggered.connect(self.confirm_delete_current_project)
+        file_menu.addAction(act_del_proj)
 
         file_menu.addSeparator()
 
@@ -277,6 +293,46 @@ class MainWindow(QMainWindow):
             self.on_new_conversation_requested()
         self.status.showMessage("Đã xóa cuộc trò chuyện.")
 
+    def confirm_delete_current_conversation(self):
+        if not self.current_conv_id:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Xác Nhận Xóa Cuộc Trò Chuyện",
+            "Bạn có chắc muốn xóa cuộc trò chuyện hiện tại?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.on_delete_conversation_requested(self.current_conv_id)
+
+    def confirm_delete_current_project(self):
+        if not self.current_project:
+            return
+        proj_name = self.current_project.get("name", "dự án")
+        reply = QMessageBox.question(
+            self,
+            "Xác Nhận Xóa Dự Án Khỏi Danh Sách",
+            f"Bạn có chắc muốn xóa dự án '{proj_name}' khỏi danh sách quản lý?\n(Thư mục thực tế trên ổ đĩa sẽ không bị ảnh hưởng).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.on_delete_project_requested(self.current_project["id"])
+
+    def on_delete_project_requested(self, project_id: str):
+        is_current = (self.current_project and self.current_project.get("id") == project_id)
+        self.session_mgr.delete_project(project_id)
+        projects = self.session_mgr.get_projects()
+        if is_current:
+            if projects:
+                self.switch_workspace(projects[0]["path"])
+            else:
+                user_home = os.path.expanduser("~")
+                new_proj = self.session_mgr.get_or_create_project(user_home)
+                self.switch_workspace(new_proj["path"])
+        else:
+            self.sidebar.reload_projects_list(self.root_dir)
+        self.status.showMessage("Đã xóa dự án khỏi danh sách.")
+
     def on_message_persisted(self, msg: dict):
         if not self.current_conv_id:
             conv = self.session_mgr.create_conversation(self.current_project["id"])
@@ -284,6 +340,18 @@ class MainWindow(QMainWindow):
 
         self.session_mgr.append_message(self.current_project["id"], self.current_conv_id, msg)
         self.sidebar.reload_conversations(self.current_project["id"], select_conv_id=self.current_conv_id)
+
+    def on_message_deleted(self, index: int):
+        if self.current_conv_id and self.current_project:
+            self.session_mgr.delete_message(self.current_project["id"], self.current_conv_id, index)
+            self.sidebar.reload_conversations(self.current_project["id"], select_conv_id=self.current_conv_id)
+            self.status.showMessage("Đã xóa tin nhắn.")
+
+    def on_messages_cleared(self):
+        if self.current_conv_id and self.current_project:
+            self.session_mgr.clear_conversation_messages(self.current_project["id"], self.current_conv_id)
+            self.sidebar.reload_conversations(self.current_project["id"], select_conv_id=self.current_conv_id)
+            self.status.showMessage("Đã xóa toàn bộ tin nhắn.")
 
     def switch_workspace(self, folder_path: str):
         folder_path = os.path.abspath(folder_path)
@@ -410,6 +478,8 @@ class MainWindow(QMainWindow):
         self.config.thinking = options.get("thinking", True)
         self.config.dual_ai_mode = options.get("dual_ai", False)
         self.config.auto_apply = options.get("auto_apply", False)
+        self.config.web_search = options.get("web_search", getattr(self.config, "web_search", True))
+        self.agent.config = self.config
 
         self.current_task = task
         self.loop_goal = task
@@ -496,10 +566,12 @@ class MainWindow(QMainWindow):
         should_autorun = is_auto or any(kw in task_lower for kw in ["chạy", "run", "khởi động", "start", "cài", "install", "fix", "sửa"])
 
         if commands and should_autorun:
-            first_cmd = commands[0]["command"]
+            self.command_queue = [c["command"] for c in commands]
+            first_cmd = self.command_queue.pop(0)
+            queue_info = f"<br>• <i>(Còn {len(self.command_queue)} lệnh đang chờ trong hàng đợi)</i>" if self.command_queue else ""
             self.editor.chat_view.add_system_message(
                 "🚀 ĐANG TỰ ĐỘNG THỰC THI TIẾN TRÌNH",
-                f"• Đang thực thi lệnh: <code>{first_cmd}</code><br>"
+                f"• Đang thực thi lệnh: <code>{first_cmd}</code>{queue_info}<br>"
                 f"• <i>Hệ thống đang xử lý ngầm (đang tải/cài đặt). Khi lệnh kết thúc, AI sẽ <b>tự động phân tích log và chạy tiếp bước sau</b> mà bạn không cần phải gõ lệnh tiếp tục!</i>"
             )
             QTimer.singleShot(600, lambda: self.run_terminal_command(first_cmd))
@@ -619,21 +691,31 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"Tiến trình kết thúc: {status_text}")
 
     def on_stop_process_requested(self):
+        self.command_queue.clear()
         self.feedback_loop_active = False
         self.process_runner.kill_process()
         self.editor.chat_view.add_system_message(
             "⏹ ĐÃ DỪNG TIẾN TRÌNH",
-            "Bạn đã chủ động dừng tiến trình. Vòng lặp tự động đã được kết thúc."
+            "Bạn đã chủ động dừng tiến trình. Toàn bộ hàng đợi lệnh và vòng lặp tự động đã được kết thúc."
         )
 
     def on_command_completed(self, cmd: str, exit_code: int, full_log: str):
         if not self.feedback_loop_active or not self.prompt.chk_feedback.isChecked():
             return
 
-        # Kiểm tra nếu lệnh vừa kết thúc là lệnh chạy ứng dụng (GUI hoặc Script chính)
-        # và đã kết thúc thành công (Exit Code: 0).
-        # Khi người dùng đóng ứng dụng GUI, app.exec() trả về 0 -> tiến trình kết thúc sạch.
-        # Ta cần dừng ngay vòng lặp để tránh việc AI tự động mở lại ứng dụng gây phiền toái.
+        # 1. Nếu còn lệnh trong hàng đợi do AI đã xuất ra -> Tiếp tục chạy lệnh tiếp theo ngay lập tức
+        if self.command_queue:
+            next_cmd = self.command_queue.pop(0)
+            queue_info = f"<br>• <i>(Còn {len(self.command_queue)} lệnh đang chờ trong hàng đợi)</i>" if self.command_queue else ""
+            self.editor.chat_view.add_system_message(
+                "🚀 TIẾP TỤC LỆNH TIẾP THEO TRONG HÀNG ĐỢI",
+                f"• Lệnh vừa hoàn tất: <code>{cmd}</code> (Mã thoát: {exit_code})<br>"
+                f"• Đang thực thi: <code>{next_cmd}</code>{queue_info}"
+            )
+            QTimer.singleShot(600, lambda: self.run_terminal_command(next_cmd))
+            return
+
+        # 2. Khi hàng đợi rỗng: Kiểm tra điều kiện hoàn tất hoặc chuyển sang vòng lặp phản hồi
         cmd_clean = cmd.strip()
         cmd_lower = cmd_clean.lower()
 
@@ -647,20 +729,23 @@ class MainWindow(QMainWindow):
 
         has_critical_error = bool(re.search(r'Traceback \(most recent call last\):|ModuleNotFoundError:|ImportError:|SyntaxError:', full_log))
 
-        if (is_script_run or is_app_keyword) and not is_helper_cmd and exit_code == 0 and not has_critical_error:
-            self.feedback_loop_active = False
-            self.editor.chat_view.add_system_message(
-                "🎉 ỨNG DỤNG ĐÃ HOÀN TẤT PHIÊN LÀM VIỆC",
-                f"Tiến trình <code>{cmd}</code> đã kết thúc thành công (Mã thoát: 0).<br>"
-                "Người dùng đã đóng ứng dụng hoặc tiến trình hoàn tất bình thường.<br>"
-                "Hệ thống đã tự động dừng vòng lặp để không tự động mở lại ứng dụng."
-            )
-            return
+        # Chỉ ngắt vòng lặp khi người dùng có cấu hình giới hạn bước (> 0)
+        # Nếu max_feedback_loops == 0 (mặc định không giới hạn): AI được đọc log thực tế để tự quyết định đã hoàn tất mục tiêu hay cần chạy lệnh tiếp theo!
+        if self.max_feedback_loops and self.max_feedback_loops > 0:
+            if (is_script_run or is_app_keyword) and not is_helper_cmd and exit_code == 0 and not has_critical_error:
+                self.feedback_loop_active = False
+                self.editor.chat_view.add_system_message(
+                    "🎉 ỨNG DỤNG ĐÃ HOÀN TẤT PHIÊN LÀM VIỆC",
+                    f"Tiến trình <code>{cmd}</code> đã kết thúc thành công (Mã thoát: 0).<br>"
+                    "Người dùng đã đóng ứng dụng hoặc tiến trình hoàn tất bình thường.<br>"
+                    "Hệ thống đã tự động dừng vòng lặp để không tự động mở lại ứng dụng."
+                )
+                return
 
         self.start_agent_feedback_step(cmd, exit_code, full_log)
 
     def start_agent_feedback_step(self, cmd: str, exit_code: int, full_log: str):
-        if self.feedback_loop_count >= self.max_feedback_loops:
+        if self.max_feedback_loops and self.max_feedback_loops > 0 and self.feedback_loop_count >= self.max_feedback_loops:
             self.feedback_loop_active = False
             self.editor.chat_view.add_system_message(
                 "⚠️ ĐÃ ĐẠT GIỚI HẠN BƯỚC TỰ ĐỘNG",
@@ -670,10 +755,11 @@ class MainWindow(QMainWindow):
 
         self.feedback_loop_count += 1
         step_num = self.feedback_loop_count
-        self.status.showMessage(f"🤖 AI đang đọc log Terminal của lệnh `{cmd}` (Bước {step_num}/{self.max_feedback_loops})...")
+        step_label = f"Bước {step_num}/{self.max_feedback_loops}" if (self.max_feedback_loops and self.max_feedback_loops > 0) else f"Bước {step_num} (Tự động liên tục)"
+        self.status.showMessage(f"🤖 AI đang đọc log Terminal của lệnh `{cmd}` ({step_label})...")
 
         self.editor.chat_view.add_system_message(
-            f"🤖 AI ĐANG PHÂN TÍCH LOG TERMINAL (Bước {step_num}/{self.max_feedback_loops})",
+            f"🤖 AI ĐANG PHÂN TÍCH LOG TERMINAL ({step_label})",
             f"• Lệnh vừa kết thúc: <code>{cmd}</code> (Mã thoát: {exit_code})<br>"
             f"• AI đang phân tích log thời gian thực để gửi lệnh tiếp theo..."
         )
@@ -732,10 +818,12 @@ class MainWindow(QMainWindow):
             self.update_codebase_views()
 
         if commands:
-            next_cmd = commands[0]["command"]
+            self.command_queue = [c["command"] for c in commands]
+            next_cmd = self.command_queue.pop(0)
+            queue_info = f"<br>• <i>(Còn {len(self.command_queue)} lệnh đang chờ trong hàng đợi)</i>" if self.command_queue else ""
             self.editor.chat_view.add_system_message(
                 "🚀 TIẾP TỤC CHẠY BƯỚC TIẾP THEO",
-                f"Lệnh: <code>{next_cmd}</code>"
+                f"• Lệnh: <code>{next_cmd}</code>{queue_info}"
             )
             QTimer.singleShot(800, lambda: self.run_terminal_command(next_cmd))
         elif (actions or create_files) and self.process_runner.current_cmd:
@@ -873,10 +961,12 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.config, self)
         if dlg.exec():
             self.agent.config = self.config
+            self.max_feedback_loops = getattr(self.config, "max_feedback_loops", 0)
             self.prompt.set_model(self.config.model)
             self.prompt.chk_thinking.setChecked(self.config.thinking)
             self.prompt.chk_dual.setChecked(self.config.dual_ai_mode)
             self.prompt.chk_auto.setChecked(self.config.auto_apply)
+            self.prompt.chk_web.setChecked(getattr(self.config, "web_search", True))
             self.status.showMessage(f"Đã cập nhật cấu hình | Model: {self.config.model}")
 
     def show_about(self):

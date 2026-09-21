@@ -24,6 +24,7 @@ class SidebarWidget(QWidget):
     new_conversation_requested = Signal()
     rename_conversation_requested = Signal(str, str) # conv_id, new_title
     delete_conversation_requested = Signal(str) # conv_id
+    delete_project_requested = Signal(str) # project_id
 
     file_selected = Signal(str)
     symbol_selected = Signal(str, int, int) # file, start_line, end_line
@@ -240,6 +241,25 @@ class SidebarWidget(QWidget):
             # Switching first keeps rename/delete routed to the conversation's project.
             self.project_conversation_selected.emit(data["path"], data["id"])
             self.conversation_menu(data, self.projects_tree.mapToGlobal(pos))
+        elif data and data.get("type") == "project":
+            p_path = data.get("path")
+            proj = next((p for p in self.session_mgr.get_projects() if os.path.abspath(p["path"]) == os.path.abspath(p_path)), None)
+            if proj:
+                menu = QMenu(self)
+                act_switch = menu.addAction(icon("folder"), "Mở Dự Án Này")
+                act_delete = menu.addAction(icon("trash"), "🗑️ Xóa Dự Án Khỏi Danh Sách")
+                action = menu.exec(self.projects_tree.mapToGlobal(pos))
+                if action == act_switch:
+                    self.project_switched.emit(proj["path"])
+                elif action == act_delete:
+                    reply = QMessageBox.question(
+                        self,
+                        "Xác Nhận Xóa Dự Án Khỏi Danh Sách",
+                        f"Bạn có chắc muốn xóa dự án '{proj['name']}' khỏi danh sách quản lý?\n(Thư mục thực tế trên ổ đĩa sẽ không bị ảnh hưởng).",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if reply == QMessageBox.StandardButton.Yes:
+                        self.delete_project_requested.emit(proj["id"])
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(

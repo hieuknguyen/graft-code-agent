@@ -112,6 +112,25 @@ Chạy bộ kiểm thử phù hợp, nhưng hỏi tôi trước khi thực thi l
 
 Dự án vẫn giữ các thành phần AST grafting: lập chỉ mục class/hàm, tạo diff và kiểm tra cú pháp trước khi áp dụng. Chúng hỗ trợ agent giới hạn thay đổi vào phần mã cần thiết thay vì viết lại cả tệp. Một số giao diện desktop/web cũ hướng tới workflow gateway; CLI là cách rõ ràng nhất để sử dụng chế độ Gemini trực tiếp và các bước xác nhận an toàn.
 
+## AI prompts
+
+The maintained model instructions are written in English. User-facing replies follow the user's
+language and default to Vietnamese. Project source, user requests, and diagnostic report data retain
+their original language.
+
+- `core/prompts.py` contains the shared engineering instructions, gateway action protocol, Gemini
+  tool protocol, context follow-up, and terminal-feedback instructions.
+- `core/context_builder.py` assembles the gateway's project context and loads the additional
+  guidelines from `rules/SENIOR_ENGINEERING_RULES.md`. The root `SENIOR_ENGINEERING_RULES.md` is a
+  compatibility fallback; keep the two copies aligned.
+- `core/agent.py` adds source excerpts, web results, and diagnostic hypotheses to gateway requests.
+- `core/gemini_agent.py` uses the shared engineering instructions with its function-tool protocol.
+
+The prompts require source-based investigation, focused changes, root-cause diagnosis, and evidence
+before completion claims. They distinguish proposals from applied and verified work. They do not
+change runtime permissions or approval settings. Gateway retrieval currently has one follow-up pass;
+Gemini exposes only its declared tools. Missing evidence must be reported honestly at those limits.
+
 ## Kiểm thử desktop
 
 Các kiểm thử desktop chạy ở chế độ offscreen nên có thể dùng trong CI Linux:

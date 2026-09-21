@@ -93,10 +93,16 @@ class PromptTextEdit(QPlainTextEdit):
                 if not img.isNull():
                     self.prompt_widget.add_qimage(img, name=f"screenshot_{len(self.prompt_widget.attached_images) + 1}.png")
                     return
-        # Gửi prompt (Ctrl + Enter)
-        if event.key() == Qt.Key.Key_Return and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
-            self.prompt_widget.submit_prompt()
-            return
+        # Phím Enter hoặc Ctrl + Enter: gửi nội dung cho AI. Phím Shift + Enter: xuống dòng
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                # Shift + Enter: xuống dòng
+                self.insertPlainText("\n")
+                return
+            elif not (event.modifiers() & Qt.KeyboardModifier.AltModifier):
+                # Enter đơn thuần hoặc Ctrl + Enter: gửi prompt
+                self.prompt_widget.submit_prompt()
+                return
         super().keyPressEvent(event)
 
     def dragEnterEvent(self, event):
@@ -182,7 +188,7 @@ class PromptWidget(QWidget):
         self.btn_graft = QPushButton(icon("arrow_right", "#a4a4a4"), "")
         self.btn_graft.setObjectName("sendButton")
         self.btn_graft.setFixedSize(34, 34)
-        self.btn_graft.setToolTip("Gửi yêu cầu (Ctrl+Enter)")
+        self.btn_graft.setToolTip("Gửi yêu cầu (Enter gửi, Shift+Enter xuống dòng)")
         self.btn_graft.setAccessibleName("Gửi yêu cầu")
         self.btn_graft.clicked.connect(self.submit_prompt)
         tools_layout.addWidget(self.btn_graft)
@@ -228,14 +234,17 @@ class PromptWidget(QWidget):
         self.chk_auto.setToolTip("Cho phép áp dụng các đề xuất mà không nhấn nút Áp dụng")
         self.chk_feedback = QCheckBox("Đọc log và tiếp tục")
         self.chk_feedback.setChecked(True)
+        self.chk_web = QCheckBox("Tìm kiếm web (Tự động)")
+        self.chk_web.setChecked(True)
+        self.chk_web.setToolTip("AI sẽ tự động nhận diện câu hỏi và tra cứu Internet khi cần thiết. Bỏ tích nếu muốn tắt hoàn toàn tìm kiếm web.")
         self.mode_label = QLabel("Xem trước thay đổi")
         self.mode_label.setObjectName("muted")
         self.chk_auto.toggled.connect(lambda enabled: self.mode_label.setText(
             "Tự động áp dụng" if enabled else "Xem trước thay đổi"
         ))
-        for i, checkbox in enumerate((self.chk_thinking, self.chk_dual, self.chk_auto, self.chk_feedback)):
+        for i, checkbox in enumerate((self.chk_thinking, self.chk_dual, self.chk_auto, self.chk_feedback, self.chk_web)):
             options_layout.addWidget(checkbox, 1 + i // 2, i % 2)
-        options_layout.addWidget(self.mode_label, 3, 0, 1, 2)
+        options_layout.addWidget(self.mode_label, 4, 0, 1, 2)
         self.badge_in = QLabel("Input: 0")
         self.badge_out = QLabel("Output: 0")
         self.badge_total = QLabel("0 token")
@@ -243,7 +252,7 @@ class PromptWidget(QWidget):
         for badge in (self.badge_in, self.badge_out, self.badge_total):
             badge.setObjectName("muted")
             stats.addWidget(badge)
-        options_layout.addLayout(stats, 4, 0, 1, 2)
+        options_layout.addLayout(stats, 5, 0, 1, 2)
         self.options_panel.hide()
         self.btn_options.toggled.connect(self.options_panel.setVisible)
         self.btn_options.toggled.connect(self.sync_actions)
@@ -368,6 +377,7 @@ class PromptWidget(QWidget):
             "thinking": self.chk_thinking.isChecked(),
             "dual_ai": self.chk_dual.isChecked(),
             "auto_apply": self.chk_auto.isChecked(),
+            "web_search": self.chk_web.isChecked(),
             "images": images
         }
         self.prompt_edit.clear()

@@ -60,7 +60,9 @@ class AppConfig:
     # File writes and command execution must require approval by default.
     auto_apply: bool = False
     thinking: bool = True
-    web_search: bool = False
+    web_search: bool = True
+    # 0 = Không giới hạn số lệnh (Unlimited command executions)
+    max_feedback_loops: int = 0
     # Kept out of repr so diagnostics and UI cannot accidentally disclose it.
     # It is populated only from GEMINI_API_KEY, never config.yaml.
     gemini_api_key: str = field(default="", repr=False)
@@ -121,6 +123,12 @@ def load_config() -> AppConfig:
         if name in data:
             setattr(cfg, name, _as_bool(data[name], getattr(cfg, name)))
 
+    if "max_feedback_loops" in data:
+        try:
+            cfg.max_feedback_loops = max(0, int(data["max_feedback_loops"]))
+        except (ValueError, TypeError):
+            cfg.max_feedback_loops = 0
+
     # Generic environment variables preserve old gateway deployments.
     cfg.gateway_url = os.environ.get("GRAFT_GATEWAY_URL", cfg.gateway_url).strip()
     cfg.model = os.environ.get("GRAFT_MODEL", cfg.model).strip()
@@ -157,6 +165,7 @@ def save_config(cfg: AppConfig) -> None:
         "auto_apply": cfg.auto_apply,
         "thinking": cfg.thinking,
         "web_search": cfg.web_search,
+        "max_feedback_loops": getattr(cfg, "max_feedback_loops", 0),
     }
     if provider == GATEWAY_PROVIDER and cfg.api_key:
         data["api_key"] = cfg.api_key

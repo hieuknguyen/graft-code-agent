@@ -2,9 +2,11 @@ import html
 import re
 from urllib.parse import quote, unquote
 from typing import List, Dict, Any, Optional
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser, QMessageBox
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QTextCursor, QTextDocument
+
+from core.text_utils import sanitize_latex
 
 class ChatWidget(QWidget):
     action_apply_clicked = Signal(dict)
@@ -13,6 +15,8 @@ class ChatWidget(QWidget):
     action_create_file_clicked = Signal(str)
     action_delete_file_clicked = Signal(str)
     message_persisted = Signal(dict)
+    message_deleted = Signal(int)
+    messages_cleared = Signal()
     content_changed = Signal(bool)
 
     def __init__(self, parent=None):
@@ -33,10 +37,11 @@ class ChatWidget(QWidget):
         self.render_all()
 
     def markdown_to_html(self, text: str) -> str:
+        clean_text = sanitize_latex(text)
         doc = QTextDocument()
-        doc.setMarkdown(text)
+        doc.setMarkdown(clean_text)
         body_match = re.search(r"<body[^>]*>(.*)</body>", doc.toHtml(), flags=re.DOTALL)
-        body = body_match.group(1).strip() if body_match else html.escape(text).replace("\n", "<br>")
+        body = body_match.group(1).strip() if body_match else html.escape(clean_text).replace("\n", "<br>")
         body = re.sub(r'<p style="', '<p style="color:#c9c9c9; ', body)
         body = re.sub(r'<li style="', '<li style="color:#c9c9c9; ', body)
         body = re.sub(r'<pre style="', '<pre style="background-color:#202020; color:#c9c9c9; ', body)
@@ -46,6 +51,17 @@ class ChatWidget(QWidget):
 
     def _message_spacer(self) -> str:
         return "<p style='font-size:6px; line-height:6px; margin:0;'>&nbsp;</p>"
+
+    def _header_row(self, title: str, msg_idx: int, align: str = "left") -> str:
+        color = "#7e828d"
+        return f"""
+        <table width='100%' cellspacing='0' cellpadding='0' border='0' style='margin-bottom:6px;'>
+          <tr>
+            <td align='left'><span style='font-size:11px; font-weight:bold; color:#d0d0d0;'>{title}</span></td>
+            <td align='right'><a href='deletemsg:///{msg_idx}' style='color:{color}; text-decoration:none; font-size:11px; padding:2px 4px;' title='Xóa đoạn tin nhắn này'>🗑️ Xóa</a></td>
+          </tr>
+        </table>
+        """
 
     def _bubble(self, inner_html: str, bg: str, border: str = "#292929", align: str = "left") -> str:
         width = "86%" if align == "right" else "100%"
@@ -64,12 +80,13 @@ class ChatWidget(QWidget):
         {self._message_spacer()}
         """
 
-    def add_user_message(self, text: str, images: Optional[List[str]] = None, persist: bool = True):
+    def add_user_message(self, text: str, images: Optional[List[str]] = None, persist: bool = True, msg_index: Optional[int] = None):
         msg_dict = {"role": "user", "text": text, "images": images or []}
         if persist:
             self.raw_messages.append(msg_dict)
             self.message_persisted.emit(msg_dict)
 
+        idx = msg_index if msg_index is not None else (len(self.raw_messages) - 1)
         escaped = html.escape(text).replace("\n", "<br>")
         
         images_html = ""
@@ -79,8 +96,9 @@ class ChatWidget(QWidget):
                 img_tags += f"<p style='margin-top:8px;'><img src='{img_uri}' width='320' /></p>"
             images_html = img_tags
 
+        header = self._header_row("BẠN", idx, align="right")
         msg_html = self._bubble(
-            "<p style='font-size:11px; font-weight:bold; color:#d0d0d0; margin:0 0 8px 0;'>BẠN</p>"
+            f"{header}"
             f"<p style='font-size:13px; color:#dddddd; margin:0;'>{escaped}</p>"
             f"{images_html}",
             "#2d313a",
@@ -91,7 +109,7 @@ class ChatWidget(QWidget):
         self.render_all()
 
     def add_ai_message(self, text: str, graft_actions: List[dict] = None, create_files: List[dict] = None,
-                       delete_files: List[dict] = None, commands: List[dict] = None, tokens: dict = None, persist: bool = True, auto_applied: bool = False):
+                       delete_files: List[dict] = None, commands: List[dict] = None, tokens: dict = None, persist: bool = True, auto_applied: bool = False, msg_index: Optional[int] = None):
         msg_dict = {
             "role": "ai",
             "text": text,
@@ -99,12 +117,14 @@ class ChatWidget(QWidget):
             "create_files": create_files,
             "delete_files": delete_files,
             "commands": commands,
-            "tokens": tokens
+            "tokens": tokens,
+            "auto_applied": auto_applied
         }
         if persist:
             self.raw_messages.append(msg_dict)
             self.message_persisted.emit(msg_dict)
 
+        idx = msg_index if msg_index is not None else (len(self.raw_messages) - 1)
         content_html = self.markdown_to_html(text)
 
         cards_html = ""
@@ -209,8 +229,9 @@ class ChatWidget(QWidget):
             out = tokens.get('output_tokens', 0)
             token_info = f"<div style='margin-top: 8px; font-size: 11px; color: #9699a3;'>📊 Tiêu thụ: Input {inp:,} tok | Output {out:,} tok</div>"
 
+        header = self._header_row("GRAFT", idx)
         msg_html = self._bubble(
-            "<p style='font-size:11px; font-weight:bold; color:#d0d0d0; margin:0 0 8px 0;'>GRAFT</p>"
+            f"{header}"
             f"<div style='font-size:13px;'>{content_html}</div>"
             f"{cards_html}"
             f"{token_info}",
@@ -220,14 +241,16 @@ class ChatWidget(QWidget):
         self.chat_history.append(msg_html)
         self.render_all()
 
-    def add_system_message(self, title: str, text: str, persist: bool = True):
+    def add_system_message(self, title: str, text: str, persist: bool = True, msg_index: Optional[int] = None):
         msg_dict = {"role": "system", "title": title, "text": text}
         if persist:
             self.raw_messages.append(msg_dict)
             self.message_persisted.emit(msg_dict)
 
+        idx = msg_index if msg_index is not None else (len(self.raw_messages) - 1)
+        header = self._header_row(title, idx)
         msg_html = self._bubble(
-            f"<p style='font-size:12px; font-weight:bold; color:#d0d0d0; margin:0 0 6px 0;'>{html.escape(title)}</p>"
+            f"{header}"
             f"<p style='font-size:12px; color:#c9c9c9; margin:0;'>{html.escape(text)}</p>",
             "#202020",
             "#4c4c4c",
@@ -238,11 +261,11 @@ class ChatWidget(QWidget):
     def load_messages(self, messages: List[dict]):
         """Nạp lại danh sách tin nhắn của một cuộc trò chuyện từ đĩa."""
         self.chat_history.clear()
-        self.raw_messages.clear()
-        for m in messages:
+        self.raw_messages = list(messages)
+        for idx, m in enumerate(messages):
             role = m.get("role")
             if role == "user":
-                self.add_user_message(m.get("text", ""), images=m.get("images", []), persist=False)
+                self.add_user_message(m.get("text", ""), images=m.get("images", []), persist=False, msg_index=idx)
             elif role == "ai":
                 self.add_ai_message(
                     m.get("text", ""),
@@ -251,12 +274,31 @@ class ChatWidget(QWidget):
                     delete_files=m.get("delete_files"),
                     commands=m.get("commands"),
                     tokens=m.get("tokens"),
-                    persist=False
+                    persist=False,
+                    auto_applied=m.get("auto_applied", False),
+                    msg_index=idx
                 )
             elif role == "system":
-                self.add_system_message(m.get("title", ""), m.get("text", ""), persist=False)
-        self.raw_messages = list(messages)
+                self.add_system_message(m.get("title", ""), m.get("text", ""), persist=False, msg_index=idx)
         self.render_all()
+
+    def confirm_and_delete_message(self, index: int):
+        if not (0 <= index < len(self.raw_messages)):
+            return
+        reply = QMessageBox.question(
+            self,
+            "Xác Nhận Xóa Đoạn Đối Thoại",
+            "Bạn có chắc muốn xóa đoạn tin nhắn này khỏi cuộc trò chuyện?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.delete_message_at(index)
+
+    def delete_message_at(self, index: int):
+        if 0 <= index < len(self.raw_messages):
+            del self.raw_messages[index]
+            self.load_messages(list(self.raw_messages))
+            self.message_deleted.emit(index)
 
     def render_all(self):
         content = ''.join(self.chat_history)
@@ -280,6 +322,7 @@ class ChatWidget(QWidget):
         self.chat_history.clear()
         self.raw_messages.clear()
         self.render_all()
+        self.messages_cleared.emit()
 
     def on_link_clicked(self, url):
         scheme = url.scheme().lower()
@@ -294,3 +337,9 @@ class ChatWidget(QWidget):
             self.action_create_file_clicked.emit(path)
         elif scheme == "deletefile":
             self.action_delete_file_clicked.emit(path)
+        elif scheme == "deletemsg":
+            try:
+                msg_idx = int(path)
+                self.confirm_and_delete_message(msg_idx)
+            except Exception:
+                pass

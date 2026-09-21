@@ -210,3 +210,22 @@ class SessionManager:
             file_path.unlink()
             return True
         return False
+
+    def delete_message(self, project_id: str, conv_id: str, message_index: int) -> bool:
+        """Xóa 1 tin nhắn tại vị trí message_index khỏi cuộc trò chuyện."""
+        conv = self.get_conversation(project_id, conv_id)
+        if conv and "messages" in conv:
+            if 0 <= message_index < len(conv["messages"]):
+                del conv["messages"][message_index]
+                self.save_conversation(project_id, conv_id, conv)
+                return True
+        return False
+
+    def clear_conversation_messages(self, project_id: str, conv_id: str) -> bool:
+        """Xóa sạch tin nhắn trong cuộc trò chuyện nhưng vẫn giữ metadata."""
+        conv = self.get_conversation(project_id, conv_id)
+        if conv:
+            conv["messages"] = []
+            self.save_conversation(project_id, conv_id, conv)
+            return True
+        return False

@@ -1,4 +1,5 @@
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
@@ -7,6 +8,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -84,6 +86,18 @@ class SettingsDialog(QDialog):
         self.eval_combo.setCurrentText(self.config.evaluator_model)
         form.addRow(QLabel("AI Model Phản Biện (Dual):"), self.eval_combo)
 
+        self.chk_web_search = QCheckBox("Tự động tìm kiếm web khi cần (AI tự quyết định)")
+        self.chk_web_search.setChecked(getattr(self.config, "web_search", True))
+        self.chk_web_search.setToolTip("Khi bật, AI sẽ tự động phân tích câu hỏi và tra cứu Internet khi cần thiết mà bạn không phải bật thủ công.")
+        form.addRow(QLabel("Tìm kiếm mạng:"), self.chk_web_search)
+
+        self.spin_max_loops = QSpinBox()
+        self.spin_max_loops.setRange(0, 9999)
+        self.spin_max_loops.setValue(getattr(self.config, "max_feedback_loops", 0))
+        self.spin_max_loops.setSpecialValueText("Không giới hạn (0)")
+        self.spin_max_loops.setToolTip("Số bước chạy lệnh terminal và phân tích log tự động tối đa. Đặt 0 để AI được phép chạy bao nhiêu lệnh cũng được.")
+        form.addRow(QLabel("Giới hạn bước chạy lệnh:"), self.spin_max_loops)
+
         layout.addLayout(form)
 
         btn_box = QHBoxLayout()
@@ -135,6 +149,8 @@ class SettingsDialog(QDialog):
         self.config.provider = provider
         self.config.model = model
         self.config.evaluator_model = eval_model
+        self.config.web_search = self.chk_web_search.isChecked()
+        self.config.max_feedback_loops = self.spin_max_loops.value()
 
         save_config(self.config)
         if provider == GEMINI_PROVIDER:

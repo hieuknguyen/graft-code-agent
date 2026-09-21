@@ -32,6 +32,7 @@ PATHS = {
     "panel": '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/>',
     "play": '<path d="m8 4 12 8-12 8z"/>',
     "stop": '<rect x="6" y="6" width="12" height="12" rx="1"/>',
+    "trash": '<path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2M10 11v6M14 11v6"/>',
 }
 
 
