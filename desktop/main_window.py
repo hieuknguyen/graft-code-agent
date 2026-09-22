@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
         self.prompt.apply_requested.connect(self.on_apply_requested)
         self.prompt.undo_requested.connect(self.on_undo_requested)
         self.prompt.settings_requested.connect(self.open_settings)
+        self.prompt.cancel_requested.connect(self.cancel_ai_task)
         self.prompt.set_model(self.config.model)
         self.prompt.chk_thinking.setChecked(self.config.thinking)
         self.prompt.chk_dual.setChecked(self.config.dual_ai_mode)
@@ -173,8 +174,8 @@ class MainWindow(QMainWindow):
     def open_project_conversation(self, folder_path, conv_id):
         folder_path = os.path.abspath(folder_path)
         if folder_path != self.root_dir:
-            self.switch_workspace(folder_path)
-        if folder_path == self.root_dir:
+            self.switch_workspace(folder_path, target_conv_id=conv_id)
+        else:
             self.on_conversation_selected(conv_id)
             self.sidebar.reload_conversations(self.current_project["id"], select_conv_id=conv_id)
 
@@ -356,7 +357,7 @@ class MainWindow(QMainWindow):
             self.sidebar.reload_conversations(self.current_project["id"], select_conv_id=self.current_conv_id)
             self.status.showMessage("Đã xóa toàn bộ tin nhắn.")
 
-    def switch_workspace(self, folder_path: str):
+    def switch_workspace(self, folder_path: str, target_conv_id: Optional[str] = None):
         folder_path = os.path.abspath(folder_path)
         if not os.path.exists(folder_path) or not os.path.isdir(folder_path):
             QMessageBox.warning(self, "Lỗi", f"Thư mục không tồn tại:\n{folder_path}")
@@ -383,8 +384,14 @@ class MainWindow(QMainWindow):
 
         self.sidebar.reload_projects_list(self.root_dir)
         convs = self.session_mgr.get_conversations(self.current_project["id"])
-        if convs:
-            self.current_conv_id = convs[0]["id"]
+        chosen_id = None
+        if target_conv_id and any(c["id"] == target_conv_id for c in convs):
+            chosen_id = target_conv_id
+        elif convs:
+            chosen_id = convs[0]["id"]
+
+        if chosen_id:
+            self.current_conv_id = chosen_id
             self.sidebar.reload_conversations(self.current_project["id"], select_conv_id=self.current_conv_id)
             self.on_conversation_selected(self.current_conv_id)
         else:
@@ -494,21 +501,59 @@ class MainWindow(QMainWindow):
         self.editor.chat_view.add_user_message(task, images=images)
         self.editor.show_chat()
 
-        self.prompt.btn_graft.setEnabled(False)
+        self.prompt.set_busy(True)
         self.prompt.btn_apply.setEnabled(False)
         status_msg = "AI Gateway đang phân tích văn bản & hình ảnh..." if images else "AI Gateway đang phân tích và xử lý..."
         self.status.showMessage(status_msg)
+        self.editor.chat_view.show_thinking(status_msg)
 
         if hasattr(self, "graft_worker") and self.graft_worker and self.graft_worker.isRunning():
-            self.graft_worker.wait(1000)
+            try:
+                self.graft_worker.finished.disconnect()
+                self.graft_worker.error.disconnect()
+            except Exception:
+                pass
+            self.graft_worker.requestInterruption()
 
         self.graft_worker = GraftWorker(self.agent, task, target_file, images=images)
         self.graft_worker.finished.connect(self.on_graft_finished)
         self.graft_worker.error.connect(self.on_graft_error)
         self.graft_worker.start()
 
-    def on_graft_finished(self, res: dict):
+    def cancel_ai_task(self):
+        stopped = False
+        if hasattr(self, "graft_worker") and self.graft_worker and self.graft_worker.isRunning():
+            try:
+                self.graft_worker.finished.disconnect()
+                self.graft_worker.error.disconnect()
+            except Exception:
+                pass
+            self.graft_worker.requestInterruption()
+            self.graft_worker = None
+            stopped = True
+
+        if hasattr(self, "feedback_worker") and self.feedback_worker and self.feedback_worker.isRunning():
+            try:
+                self.feedback_worker.finished.disconnect()
+                self.feedback_worker.error.disconnect()
+            except Exception:
+                pass
+            self.feedback_worker.requestInterruption()
+            self.feedback_worker = None
+            stopped = True
+
+        self._cancel_automatic_followup()
+        self.editor.chat_view.hide_thinking()
+        self.prompt.set_busy(False)
         self.prompt.btn_graft.setEnabled(True)
+        if stopped:
+            self.editor.chat_view.add_system_message("⏹ ĐÃ HỦY YÊU CẦU", "Bạn đã dừng lượt xử lý của AI.")
+            self.status.showMessage("Đã hủy yêu cầu AI.")
+
+    def on_graft_finished(self, res: dict):
+        self.prompt.set_busy(False)
+        self.prompt.btn_graft.setEnabled(True)
+        self.editor.chat_view.hide_thinking()
         tokens = res.get("tokens", {})
         self.prompt.set_tokens(tokens)
 
@@ -536,7 +581,7 @@ class MainWindow(QMainWindow):
                 for cf in create_files:
                     succ, msg = self.agent.create_new_file(cf["file"], cf["code"])
                     if succ:
-                        self.editor.chat_view.add_system_message("📝 TỰ ĐỘNG TẠO FILE", f"Đã tạo file mới: <code>{cf['file']}</code><br><a href='open_file:{cf['file']}'>Mở xem file</a>")
+                        self.editor.chat_view.add_system_message("📝 TỰ ĐỘNG TẠO FILE", f"Đã tạo file mới: <code>{cf['file']}</code><br><a href='open_file:{cf['file']}'>Mở xem file</a>", render=False)
                         self.prompt.btn_undo.setEnabled(True)
                         has_changes = True
 
@@ -544,7 +589,7 @@ class MainWindow(QMainWindow):
                 for act in actions:
                     if act.get("success"):
                         self.agent.apply_action(act)
-                        self.editor.chat_view.add_system_message("💾 TỰ ĐỘNG CẤY GHÉP", f"Đã cập nhật sửa file: <code>{act['file']}</code>")
+                        self.editor.chat_view.add_system_message("💾 TỰ ĐỘNG CẤY GHÉP", f"Đã cập nhật sửa file: <code>{act['file']}</code>", render=False)
                         self.prompt.btn_undo.setEnabled(True)
                         has_changes = True
 
@@ -582,19 +627,26 @@ class MainWindow(QMainWindow):
             )
             self._schedule_automatic_command(first_cmd, 600)
         elif (actions or create_files) and is_auto and any(kw in task_lower for kw in ["chạy", "run", "khởi động", "start"]):
-            try:
-                insp = self.agent.doctor()
-                plan = insp.get("action_plan", [])
-                srv_cmds = [p for p in plan if p.get("type") == "START_SERVER" and p.get("cmd")]
-                if srv_cmds:
-                    run_cmd = srv_cmds[0]["cmd"]
-                    self.editor.chat_view.add_system_message(
-                        "🚀 TỰ ĐỘNG KHỞI CHẠY MÁY CHỦ SAU KHI SỬA FILE",
-                        f"Đã cập nhật mã nguồn thành công. Đang tự động khởi chạy máy chủ: <code>{run_cmd}</code>..."
-                    )
-                    self._schedule_automatic_command(run_cmd, 600)
-            except Exception:
-                pass
+            run_cmd = None
+            if (self.agent.root_dir / "artisan").exists():
+                run_cmd = "php artisan serve"
+            elif (self.agent.root_dir / "manage.py").exists():
+                run_cmd = "python manage.py runserver"
+            elif (self.agent.root_dir / "package.json").exists():
+                run_cmd = "npm start"
+            elif (self.agent.root_dir / "main.py").exists():
+                run_cmd = "python main.py"
+            elif (self.agent.root_dir / "app.py").exists():
+                run_cmd = "python app.py"
+            elif (self.agent.root_dir / "run.py").exists():
+                run_cmd = "python run.py"
+
+            if run_cmd:
+                self.editor.chat_view.add_system_message(
+                    "🚀 TỰ ĐỘNG KHỞI CHẠY MÁY CHỦ SAU KHI SỬA FILE",
+                    f"Đã cập nhật mã nguồn thành công. Đang tự động khởi chạy: <code>{run_cmd}</code>..."
+                )
+                self._schedule_automatic_command(run_cmd, 600)
         elif commands:
             self.status.showMessage(f"AI đề xuất {len(commands)} lệnh Terminal. Nhấn vào thẻ lệnh trong Chat để chạy.")
         elif not actions and not create_files:
@@ -606,7 +658,9 @@ class MainWindow(QMainWindow):
                 self.status.showMessage("AI đã phản hồi xong.")
 
     def on_graft_error(self, err: str):
+        self.prompt.set_busy(False)
         self.prompt.btn_graft.setEnabled(True)
+        self.editor.chat_view.hide_thinking()
         self.status.showMessage(f"Lỗi kết nối AI: {err}")
         self.editor.chat_view.add_system_message("❌ LỖI KẾT NỐI", str(err))
 
@@ -815,7 +869,14 @@ class MainWindow(QMainWindow):
         )
 
         if hasattr(self, "feedback_worker") and self.feedback_worker and self.feedback_worker.isRunning():
-            self.feedback_worker.wait(1000)
+            try:
+                self.feedback_worker.finished.disconnect()
+                self.feedback_worker.error.disconnect()
+            except Exception:
+                pass
+            self.feedback_worker.requestInterruption()
+
+        self.editor.chat_view.show_thinking(f"🤖 AI đang đọc log Terminal ({step_label})...")
 
         self.feedback_worker = AgentFeedbackWorker(
             self.agent, self.loop_goal, cmd, exit_code, full_log
@@ -826,6 +887,7 @@ class MainWindow(QMainWindow):
         self.feedback_worker.start()
 
     def on_feedback_finished(self, res: dict):
+        self.editor.chat_view.hide_thinking()
         if not self._feedback_result_is_current():
             return
         if not res.get("success"):
@@ -847,17 +909,17 @@ class MainWindow(QMainWindow):
                 if act.get("success"):
                     succ, msg = self.agent.apply_action(act)
                     if succ:
-                        self.editor.chat_view.add_system_message("🛠️ TỰ ĐỘNG SỬA CODE", f"Đã cấy ghép sửa lỗi vào <code>{act['file']}</code>")
+                        self.editor.chat_view.add_system_message("🛠️ TỰ ĐỘNG SỬA CODE", f"Đã cấy ghép sửa lỗi vào <code>{act['file']}</code>", render=False)
                         self.prompt.btn_undo.setEnabled(True)
                         has_changes = True
                     else:
-                        self.editor.chat_view.add_system_message("❌ KHÔNG THỂ ÁP DỤNG THAY ĐỔI", msg)
+                        self.editor.chat_view.add_system_message("❌ KHÔNG THỂ ÁP DỤNG THAY ĐỔI", msg, render=False)
 
         if create_files:
             for cf in create_files:
                 succ, msg = self.agent.create_new_file(cf["file"], cf["code"])
                 if succ:
-                    self.editor.chat_view.add_system_message("📝 TỰ ĐỘNG TẠO FILE", f"Đã tạo file mới: <code>{cf['file']}</code>")
+                    self.editor.chat_view.add_system_message("📝 TỰ ĐỘNG TẠO FILE", f"Đã tạo file mới: <code>{cf['file']}</code>", render=False)
                     self.prompt.btn_undo.setEnabled(True)
                     has_changes = True
 
@@ -898,6 +960,7 @@ class MainWindow(QMainWindow):
             )
 
     def on_feedback_error(self, err: str):
+        self.editor.chat_view.hide_thinking()
         if not self._feedback_result_is_current():
             return
         self._cancel_automatic_followup()
@@ -913,7 +976,11 @@ class MainWindow(QMainWindow):
         )
 
         if hasattr(self, "probe_worker") and self.probe_worker and self.probe_worker.isRunning():
-            self.probe_worker.wait(1000)
+            try:
+                self.probe_worker.finished.disconnect()
+            except Exception:
+                pass
+            self.probe_worker.requestInterruption()
 
         self.probe_worker = ServerHealthProbeWorker(server_url, delay_ms=1000)
         generation = self._automation_generation

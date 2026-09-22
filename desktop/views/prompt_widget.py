@@ -129,6 +129,7 @@ class PromptTextEdit(QPlainTextEdit):
 
 class PromptWidget(QWidget):
     graft_requested = Signal(str, str, dict) # task, target_file, options
+    cancel_requested = Signal()
     apply_requested = Signal()
     undo_requested = Signal()
     settings_requested = Signal()
@@ -136,6 +137,7 @@ class PromptWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.attached_images: List[Dict[str, Any]] = []
+        self._is_busy = False
         self.init_ui()
 
     def init_ui(self):
@@ -190,7 +192,7 @@ class PromptWidget(QWidget):
         self.btn_graft.setFixedSize(34, 34)
         self.btn_graft.setToolTip("Gửi yêu cầu (Enter gửi, Shift+Enter xuống dòng)")
         self.btn_graft.setAccessibleName("Gửi yêu cầu")
-        self.btn_graft.clicked.connect(self.submit_prompt)
+        self.btn_graft.clicked.connect(self.on_send_or_cancel)
         tools_layout.addWidget(self.btn_graft)
         body_layout.addLayout(tools_layout)
         composer_layout.addWidget(body)
@@ -360,8 +362,27 @@ class PromptWidget(QWidget):
 
         self.preview_layout.addStretch()
 
+    def on_send_or_cancel(self):
+        if getattr(self, "_is_busy", False):
+            self.cancel_requested.emit()
+        else:
+            self.submit_prompt()
+
+    def set_busy(self, busy: bool):
+        self._is_busy = busy
+        if busy:
+            self.btn_graft.setIcon(icon("stop", "#f87171"))
+            self.btn_graft.setToolTip("Dừng xử lý yêu cầu AI")
+            self.btn_graft.setAccessibleName("Dừng xử lý")
+            self.btn_graft.setEnabled(True)
+        else:
+            self.btn_graft.setIcon(icon("arrow_right", "#a4a4a4"))
+            self.btn_graft.setToolTip("Gửi yêu cầu (Enter gửi, Shift+Enter xuống dòng)")
+            self.btn_graft.setAccessibleName("Gửi yêu cầu")
+            self.btn_graft.setEnabled(True)
+
     def submit_prompt(self):
-        if not self.btn_graft.isEnabled():
+        if getattr(self, "_is_busy", False) or not self.btn_graft.isEnabled():
             return
         task = self.prompt_edit.toPlainText().strip()
         images = [item["data_uri"] for item in self.attached_images]

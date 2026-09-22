@@ -26,6 +26,7 @@ class SessionManager:
 
         self.projects_file = self.storage_dir / "projects.json"
         self.conversations_dir = self.storage_dir / "conversations"
+        self._conv_meta_cache: Dict[str, Any] = {}
 
         self._ensure_storage_dirs()
 
@@ -103,29 +104,48 @@ class SessionManager:
             if conv_folder.exists():
                 import shutil
                 shutil.rmtree(conv_folder, ignore_errors=True)
+            # Xóa cache liên quan đến project
+            conv_folder_str = str(conv_folder.resolve())
+            self._conv_meta_cache = {
+                k: v for k, v in self._conv_meta_cache.items()
+                if not k.startswith(conv_folder_str)
+            }
             return True
         return False
 
     # ==================== CONVERSATION MANAGEMENT ====================
 
     def get_conversations(self, project_id: str) -> List[Dict[str, Any]]:
-        """Lấy danh sách các cuộc trò chuyện của một dự án (chỉ metadata)."""
+        """Lấy danh sách các cuộc trò chuyện của một dự án (chỉ metadata, có bộ nhớ đệm mtime)."""
         conv_folder = self.conversations_dir / project_id
         if not conv_folder.exists():
             return []
 
         conv_list = []
         for file in conv_folder.glob("*.json"):
+            file_key = str(file.resolve())
+            try:
+                mtime = file.stat().st_mtime
+            except OSError:
+                mtime = 0
+
+            cached = self._conv_meta_cache.get(file_key)
+            if cached and cached[0] == mtime:
+                conv_list.append(dict(cached[1]))
+                continue
+
             data = self._load_json(file)
             if data and "id" in data:
-                conv_list.append({
+                meta = {
                     "id": data.get("id"),
                     "project_id": project_id,
                     "title": data.get("title", "Cuộc trò chuyện"),
                     "created_at": data.get("created_at", ""),
                     "updated_at": data.get("updated_at", ""),
                     "message_count": len(data.get("messages", []))
-                })
+                }
+                self._conv_meta_cache[file_key] = (mtime, meta)
+                conv_list.append(dict(meta))
 
         # Sắp xếp mới nhất lên đầu
         conv_list.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
@@ -147,6 +167,19 @@ class SessionManager:
 
         file_path = self.conversations_dir / project_id / f"{conv_id}.json"
         self._save_json(file_path, conv_data)
+        file_key = str(file_path.resolve())
+        try:
+            mtime = file_path.stat().st_mtime
+        except OSError:
+            mtime = 0
+        self._conv_meta_cache[file_key] = (mtime, {
+            "id": conv_id,
+            "project_id": project_id,
+            "title": title,
+            "created_at": now_str,
+            "updated_at": now_str,
+            "message_count": 0
+        })
 
         # Cập nhật updated_at của project
         projects = self.get_projects()
@@ -170,6 +203,19 @@ class SessionManager:
         conv_data["updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         file_path = self.conversations_dir / project_id / f"{conv_id}.json"
         self._save_json(file_path, conv_data)
+        file_key = str(file_path.resolve())
+        try:
+            mtime = file_path.stat().st_mtime
+        except OSError:
+            mtime = 0
+        self._conv_meta_cache[file_key] = (mtime, {
+            "id": conv_data.get("id", conv_id),
+            "project_id": project_id,
+            "title": conv_data.get("title", "Cuộc trò chuyện"),
+            "created_at": conv_data.get("created_at", ""),
+            "updated_at": conv_data.get("updated_at", ""),
+            "message_count": len(conv_data.get("messages", []))
+        })
 
     def append_message(self, project_id: str, conv_id: str, message: Dict[str, Any]):
         """Thêm 1 tin nhắn vào cuộc trò chuyện và lưu ngay xuống đĩa."""
@@ -206,6 +252,7 @@ class SessionManager:
     def delete_conversation(self, project_id: str, conv_id: str) -> bool:
         """Xóa vĩnh viễn file cuộc trò chuyện khỏi đĩa cứng."""
         file_path = self.conversations_dir / project_id / f"{conv_id}.json"
+        self._conv_meta_cache.pop(str(file_path.resolve()), None)
         if file_path.exists():
             file_path.unlink()
             return True

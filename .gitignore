@@ -16,3 +16,4 @@ venv/
 .vscode/
 .idea/
 Thumbs.db
+storage/

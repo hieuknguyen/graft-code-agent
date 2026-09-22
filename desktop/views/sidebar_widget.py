@@ -302,13 +302,29 @@ class SidebarWidget(QWidget):
         self.reload_project_tree()
         self.filter_conversations(self.conv_search.text())
 
+    def select_conversation_in_tree(self, conv_id: Optional[str]):
+        """Đồng bộ trạng thái chọn trên cây dự án mà không cần dựng lại toàn bộ cây."""
+        if not conv_id:
+            return
+        for i in range(self.projects_tree.topLevelItemCount()):
+            folder = self.projects_tree.topLevelItem(i)
+            p_data = folder.data(0, Qt.ItemDataRole.UserRole) or {}
+            is_active = os.path.abspath(p_data.get("path", "")) == self.active_path
+            if is_active:
+                for j in range(folder.childCount()):
+                    child = folder.child(j)
+                    c_data = child.data(0, Qt.ItemDataRole.UserRole) or {}
+                    if c_data.get("id") == conv_id:
+                        self.projects_tree.setCurrentItem(child)
+                        return
+
     def on_conv_item_clicked(self, item: QListWidgetItem):
         c_data = item.data(Qt.ItemDataRole.UserRole)
         if c_data:
             c_id = c_data["id"]
             self.current_conv_id = c_id
             self.conversation_selected.emit(c_id)
-            self.reload_project_tree()
+            self.select_conversation_in_tree(c_id)
 
     def filter_conversations(self, query: str):
         q = query.strip().lower()

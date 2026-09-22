@@ -297,3 +297,108 @@ def test_switch_during_scan_loads_latest_project(window, app, tmp_path, old_scan
                 if worker is not None:
                     worker.wait(2000)
                 app.processEvents()
+
+
+def test_conversation_load_calls_render_all_once(window):
+    from unittest.mock import MagicMock
+    chat = window.editor.chat_view
+    messages = [
+        {"role": "user", "text": f"User msg {i}"} if i % 2 == 0
+        else {"role": "ai", "text": f"AI response {i}"}
+        for i in range(50)
+    ]
+    with patch.object(chat, "render_all", wraps=chat.render_all) as mock_render:
+        chat.load_messages(messages)
+        # render_all must be called only ONCE after all 50 messages, not 50+1 times
+        assert mock_render.call_count == 1
+    assert len(chat.raw_messages) == 50
+    assert len(chat.chat_history) == 50
+
+
+def test_session_manager_metadata_cache(tmp_path):
+    sm = SessionManager(str(tmp_path / "sessions"))
+    proj = sm.get_or_create_project(str(tmp_path / "my_project"))
+    c1 = sm.create_conversation(proj["id"], "Conversation 1")
+    sm.append_message(proj["id"], c1["id"], {"role": "user", "text": "Hello"})
+    
+    # First call populates cache
+    convs_1 = sm.get_conversations(proj["id"])
+    assert len(convs_1) == 1
+    assert convs_1[0]["title"] == "Conversation 1"
+    assert len(sm._conv_meta_cache) == 1
+
+    # Second call uses cache (verify _load_json is NOT called)
+    with patch.object(sm, "_load_json") as mock_load:
+        convs_2 = sm.get_conversations(proj["id"])
+        mock_load.assert_not_called()
+        assert len(convs_2) == 1
+        assert convs_2[0]["title"] == "Conversation 1"
+
+
+def test_thinking_indicator_lifecycle(window, app):
+    chat = window.editor.chat_view
+    assert chat._thinking_html is None
+    chat.show_thinking("AI đang suy nghĩ giải pháp...")
+    app.processEvents()
+    assert chat._thinking_html is not None
+    assert "AI đang suy nghĩ giải pháp..." in chat.browser.toPlainText()
+    # It must NOT be added into persistent chat history or raw_messages
+    assert len(chat.chat_history) == 0
+    assert len(chat.raw_messages) == 0
+
+    chat.hide_thinking()
+    app.processEvents()
+    assert chat._thinking_html is None
+    assert "AI đang suy nghĩ giải pháp..." not in chat.browser.toPlainText()
+
+
+def test_prompt_widget_busy_and_cancel_toggle(app):
+    prompt = PromptWidget()
+    prompt.show()
+    received_cancel = QSignalSpy(prompt.cancel_requested)
+    received_graft = QSignalSpy(prompt.graft_requested)
+
+    # Initial state
+    assert not prompt._is_busy
+    assert prompt.btn_graft.toolTip() == "Gửi yêu cầu (Enter gửi, Shift+Enter xuống dòng)"
+
+    # Set busy
+    prompt.set_busy(True)
+    assert prompt._is_busy
+    assert prompt.btn_graft.toolTip() == "Dừng xử lý yêu cầu AI"
+
+    # When busy, submitting prompt should be blocked
+    prompt.prompt_edit.setPlainText("Test prompt while busy")
+    prompt.submit_prompt()
+    assert received_graft.count() == 0
+    assert prompt.prompt_edit.toPlainText() == "Test prompt while busy"
+
+    # Clicking send/cancel while busy emits cancel_requested
+    prompt.btn_graft.click()
+    assert received_cancel.count() == 1
+
+    # Reset busy
+    prompt.set_busy(False)
+    assert not prompt._is_busy
+    assert prompt.btn_graft.toolTip() == "Gửi yêu cầu (Enter gửi, Shift+Enter xuống dòng)"
+    prompt.close()
+
+
+def test_main_window_cancel_ai_task(window, app):
+    from unittest.mock import MagicMock
+    window.prompt.set_busy(True)
+    window.editor.chat_view.show_thinking("Đang chạy...")
+    mock_worker = MagicMock()
+    mock_worker.isRunning.return_value = True
+    window.graft_worker = mock_worker
+
+    window.cancel_ai_task()
+    app.processEvents()
+
+    mock_worker.requestInterruption.assert_called_once()
+    assert window.graft_worker is None
+    assert not window.prompt._is_busy
+    assert window.editor.chat_view._thinking_html is None
+    assert "ĐÃ HỦY YÊU CẦU" in window.editor.chat_view.browser.toPlainText()
+
+

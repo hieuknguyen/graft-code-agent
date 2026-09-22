@@ -23,6 +23,7 @@ class ChatWidget(QWidget):
         super().__init__(parent)
         self.chat_history: List[str] = []
         self.raw_messages: List[Dict[str, Any]] = []
+        self._thinking_html: Optional[str] = None
         self.init_ui()
 
     def init_ui(self):
@@ -80,7 +81,7 @@ class ChatWidget(QWidget):
         {self._message_spacer()}
         """
 
-    def add_user_message(self, text: str, images: Optional[List[str]] = None, persist: bool = True, msg_index: Optional[int] = None):
+    def add_user_message(self, text: str, images: Optional[List[str]] = None, persist: bool = True, msg_index: Optional[int] = None, render: bool = True):
         msg_dict = {"role": "user", "text": text, "images": images or []}
         if persist:
             self.raw_messages.append(msg_dict)
@@ -106,10 +107,11 @@ class ChatWidget(QWidget):
             align="right",
         )
         self.chat_history.append(msg_html)
-        self.render_all()
+        if render:
+            self.render_all()
 
     def add_ai_message(self, text: str, graft_actions: List[dict] = None, create_files: List[dict] = None,
-                       delete_files: List[dict] = None, commands: List[dict] = None, tokens: dict = None, persist: bool = True, auto_applied: bool = False, msg_index: Optional[int] = None):
+                       delete_files: List[dict] = None, commands: List[dict] = None, tokens: dict = None, persist: bool = True, auto_applied: bool = False, msg_index: Optional[int] = None, render: bool = True):
         msg_dict = {
             "role": "ai",
             "text": text,
@@ -239,9 +241,10 @@ class ChatWidget(QWidget):
             "#292929",
         )
         self.chat_history.append(msg_html)
-        self.render_all()
+        if render:
+            self.render_all()
 
-    def add_system_message(self, title: str, text: str, persist: bool = True, msg_index: Optional[int] = None):
+    def add_system_message(self, title: str, text: str, persist: bool = True, msg_index: Optional[int] = None, render: bool = True):
         msg_dict = {"role": "system", "title": title, "text": text}
         if persist:
             self.raw_messages.append(msg_dict)
@@ -256,7 +259,8 @@ class ChatWidget(QWidget):
             "#4c4c4c",
         )
         self.chat_history.append(msg_html)
-        self.render_all()
+        if render:
+            self.render_all()
 
     def load_messages(self, messages: List[dict]):
         """Nạp lại danh sách tin nhắn của một cuộc trò chuyện từ đĩa."""
@@ -265,7 +269,7 @@ class ChatWidget(QWidget):
         for idx, m in enumerate(messages):
             role = m.get("role")
             if role == "user":
-                self.add_user_message(m.get("text", ""), images=m.get("images", []), persist=False, msg_index=idx)
+                self.add_user_message(m.get("text", ""), images=m.get("images", []), persist=False, msg_index=idx, render=False)
             elif role == "ai":
                 self.add_ai_message(
                     m.get("text", ""),
@@ -276,10 +280,11 @@ class ChatWidget(QWidget):
                     tokens=m.get("tokens"),
                     persist=False,
                     auto_applied=m.get("auto_applied", False),
-                    msg_index=idx
+                    msg_index=idx,
+                    render=False
                 )
             elif role == "system":
-                self.add_system_message(m.get("title", ""), m.get("text", ""), persist=False, msg_index=idx)
+                self.add_system_message(m.get("title", ""), m.get("text", ""), persist=False, msg_index=idx, render=False)
         self.render_all()
 
     def confirm_and_delete_message(self, index: int):
@@ -300,8 +305,36 @@ class ChatWidget(QWidget):
             self.load_messages(list(self.raw_messages))
             self.message_deleted.emit(index)
 
+    def show_thinking(self, text: str = "🤖 AI đang phân tích và xử lý yêu cầu..."):
+        self._thinking_html = f"""
+        <table width='100%' cellspacing='0' cellpadding='0' border='0'>
+          <tr>
+            <td align='left'>
+              <table width='100%' cellspacing='0' cellpadding='10' border='0'
+                     style='background-color:#1c1e24; border:1px dashed #3e4451;'>
+                <tr>
+                  <td>
+                    <span style='color:#a8dab5; font-size:13px; font-weight:bold;'>{html.escape(text)}</span>
+                    <div style='color:#8c93a0; font-size:11px; margin-top:4px;'>⏳ Đang kết nối mô hình AI & trích xuất ngữ cảnh... Vui lòng đợi trong giây lát.</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+        {self._message_spacer()}
+        """
+        self.render_all()
+
+    def hide_thinking(self):
+        if getattr(self, "_thinking_html", None) is not None:
+            self._thinking_html = None
+            self.render_all()
+
     def render_all(self):
         content = ''.join(self.chat_history)
+        if getattr(self, "_thinking_html", None):
+            content += self._thinking_html
         full_html = f"""
         <html>
         <head>
@@ -316,9 +349,10 @@ class ChatWidget(QWidget):
         """
         self.browser.setHtml(full_html)
         self.browser.moveCursor(QTextCursor.MoveOperation.End)
-        self.content_changed.emit(bool(self.chat_history))
+        self.content_changed.emit(bool(self.chat_history or getattr(self, "_thinking_html", None)))
 
     def clear_chat(self):
+        self._thinking_html = None
         self.chat_history.clear()
         self.raw_messages.clear()
         self.render_all()
