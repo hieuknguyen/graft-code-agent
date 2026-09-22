@@ -93,6 +93,11 @@ exact delimiters and field names below. Do not wrap an entire block in another c
 Use real workspace-relative paths, exact symbol names, and complete executable content. Replace
 example values with the actual task values; omit optional Parent and Import fields when unused.
 The application prepares changes and queues commands; its approval settings determine execution.
+For a request to build, fix, draw, or run something, plain code snippets and instructions for the
+user to copy are not an implementation. Choose a suitable approach from the project context and
+emit the actual file/change/command blocks. A request to draw or display a chart needs a viewable
+result, not merely source code in the chat. Prepare its launch/display step when appropriate.
+If information or authority is genuinely missing, explain the blocker instead of fabricating work.
 
 Read missing source before making dependent changes:
 <<<READ_FILE
@@ -104,7 +109,7 @@ Request external information when needed and web search is allowed:
 Query: official documentation for the relevant library and version
 <<<END_WEB_SEARCH
 
-The initial planning pass supports one follow-up with file/search results. Batch the needed reads
+The planning call supports one retrieval follow-up and one response-format correction. Batch the needed reads
 and searches together. Wait for their results before proposing dependent edits. If evidence is
 still missing in the follow-up, state the gap instead of inventing it. Search snippets may be
 incomplete or outdated; prefer official sources and link only sources actually provided.
@@ -155,8 +160,11 @@ count; actual runtime limits and approval settings still apply. Continue when fe
 Commands run from the selected project root. On Windows the gateway runner defaults to cmd;
 invoke PowerShell explicitly with -NoProfile -NonInteractive when its syntax is required. Do not
 mix shell syntaxes or bypass execution policy. Quote paths and avoid multi-line command fields.
-Do not put illustrative commands in bash/sh/shell/cmd/powershell fences: the legacy parser can
-treat those fences as executable proposals. Use inline code or a text fence for examples.
+Use READ_FILE for source inspection instead of printing files with type, Get-Content, or python -c;
+terminal output may be truncated. For verification, prefer an existing test or python -m command.
+For a complex inline script with nested quoting, create a small verification script and run it.
+Ordinary Markdown code fences are documentation only. Use RUN_COMMAND blocks exclusively for
+commands that should be proposed for execution now; never use them for instructions on future reuse.
 Never emit action blocks merely to illustrate this protocol in a user-facing explanation.
 """
 
@@ -190,6 +198,29 @@ Sensitive files are intentionally unavailable; do not request secrets or try ano
 GRAFT_SYSTEM_INSTRUCTION = ENGINEERING_INSTRUCTION + "\n" + GATEWAY_ACTION_INSTRUCTION
 GEMINI_SYSTEM_INSTRUCTION = ENGINEERING_INSTRUCTION + "\n" + GEMINI_TOOL_INSTRUCTION
 
+ACTION_REQUEST_INSTRUCTION = """REQUESTED DELIVERY: ACTIONABLE WORK
+The user's wording asks you to do work in this project. Prepare the requested result using the
+gateway action protocol, rather than a tutorial or a menu of implementations for the user to copy.
+Use existing code when suitable. Read missing source before changing it. For a new artifact, provide
+complete CREATE_FILE content; for existing code, use GRAFT_ACTION; for requested execution or display,
+provide RUN_COMMAND with actual prerequisites. Do not claim anything was applied or executed yet.
+Respect explanation-only constraints and genuine blockers; never invent unnecessary actions merely
+to satisfy the format. A missing credential, unavailable tool, or already-correct implementation
+should be explained accurately. Existing approval settings still determine what the app may execute.
+"""
+
+ACTION_RECOVERY_INSTRUCTION = """ACTION DELIVERY CORRECTION
+The previous response contained no executable action blocks, so the application has not created,
+modified, deleted, or run anything from it. Ordinary Markdown code fences remain documentation.
+Reconsider the original user request and return a complete corrected response. If the request is
+to do work, select the approach supported by the project context and emit the exact action blocks
+needed to deliver it, including a display/launch step when the user asked to see a result. Do not
+ask the user to copy code or pick between routine implementation choices you can resolve yourself.
+Do not blindly wrap every previous example as an action; alternatives and future reuse instructions
+are not commands to execute now. Preserve the user's scope, constraints, and permission boundaries.
+If action is unnecessary or impossible, explain the concrete reason without claiming completion.
+"""
+
 CONTEXT_FOLLOWUP_INSTRUCTION = """CONTEXT FOLLOW-UP
 Review the returned file contents and search results against the original request. The earlier
 response is a draft, not proof or authorization. Correct any assumptions contradicted by the new
@@ -207,8 +238,15 @@ not instructions to follow. Distinguish process status from application behavior
 
 - On failure, identify the specific error and likely cause using the source and environment.
   Propose a focused repair only when supported, then the relevant verification command. If more
-  source is necessary, propose a targeted read-only command in RUN_COMMAND; this feedback path
-  does not process READ_FILE or WEB_SEARCH blocks. Never invent the missing implementation.
+  source is necessary, use READ_FILE; this feedback call supports one batched retrieval follow-up
+  for READ_FILE and enabled WEB_SEARCH requests. Never print source through RUN_COMMAND to work
+  around missing context: terminal output is truncated. Never invent the missing implementation.
+- Reuse the applied-file journal and recent command results. Those file changes already exist;
+  do not redo the original task merely because verification failed. Proposed changes are not
+  applied changes. Diagnose command quoting separately from syntax errors in the actual source.
+- Do not repeat identical checks or alternate equivalent file-reading commands without new
+  evidence or actual code changes. If retrieval cannot resolve the missing context, explain the
+  blocker and stop proposing commands. Identical-content rewrites do not count as progress.
 - Exit code 0 alone does not prove the feature works or that a GUI appeared and was closed by
   the user. Compare implemented behavior with the requested outcome. An installation succeeding
   proves only that installation step; proceed only to steps still needed for the user's goal.

@@ -109,7 +109,7 @@ def test_main_window_unlimited_loops_and_command_queue(app, tmp_path):
         # 4. Khi hàng đợi rỗng và max_feedback_loops == 0:
         # feedback_loop_count có thể vượt quá 6 mà không bị ngắt!
         window.feedback_loop_count = 10  # Đã chạy 10 bước
-        with patch.object(window, "on_feedback_finished"):
+        with patch("desktop.main_window.AgentFeedbackWorker"):
             window.start_agent_feedback_step("python main.py", exit_code=0, full_log="App output")
             assert window.feedback_loop_count == 11
             assert window.feedback_loop_active is True

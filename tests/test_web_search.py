@@ -236,7 +236,7 @@ def test_in_flight_autonomous_web_search(tmp_path):
 
     with patch.object(agent.client, "query_ai", side_effect=[ai_resp_1, ai_resp_2]) as mock_ai, \
          patch.object(agent.runtime, "web_search", return_value=fake_search_res) as mock_search:
-        res = agent.plan_and_graft("Sửa file models.py để migrate sang pydantic v2")
+        res = agent.plan_and_graft("Giải thích thay đổi cần sửa trong file models.py để migrate sang pydantic v2")
         assert res["success"] is True
         assert "model_dump" in res["response"]
         assert "<<<WEB_SEARCH" not in res["response"]  # Tags are stripped from clean output

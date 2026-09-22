@@ -1,5 +1,6 @@
 import os
 import re
+from collections import deque
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from config import AppConfig
@@ -12,7 +13,11 @@ from .verifier import verify_code
 from .gemini_agent import GeminiCodingAgent
 from .tool_runtime import ToolRuntime, ToolRuntimeError
 from .text_utils import sanitize_latex
-from .prompts import CONTEXT_FOLLOWUP_INSTRUCTION, TERMINAL_FEEDBACK_INSTRUCTION
+from .prompts import (
+    ACTION_REQUEST_INSTRUCTION, ACTION_RECOVERY_INSTRUCTION,
+    CONTEXT_FOLLOWUP_INSTRUCTION, TERMINAL_FEEDBACK_INSTRUCTION,
+)
+from .task_intent import is_action_request
 
 class GraftAgent:
     def __init__(self, config: AppConfig, root_dir: str):
@@ -24,6 +29,34 @@ class GraftAgent:
         # surface, never a raw Path or a direct shell handle.
         self.runtime = ToolRuntime(str(self.root_dir))
         self.history_backups: List[Dict[str, Any]] = []
+        self.begin_task()
+
+    def begin_task(self):
+        """Keep feedback evidence scoped to the current user request."""
+        self.feedback_progress_revision = 0
+        self._task_file_changes: Dict[str, str] = {}
+        self._feedback_command_history = deque(maxlen=6)
+
+    def _record_file_change(self, rel_path: str, operation: str):
+        self.feedback_progress_revision += 1
+        self._task_file_changes[Path(rel_path).as_posix()] = operation
+
+    def _feedback_progress_context(self) -> str:
+        lines = [
+            "=== APPLIED FILE CHANGES IN THIS TASK (ACTUAL DISK OPERATIONS) ===",
+            "These changes already happened. Continue from this state; do not restart the original task.",
+            "Proposals not applied and identical-content writes are not included.",
+        ]
+        changes = list(self._task_file_changes.items())
+        lines.extend(f"- {operation}: `{path}`" for path, operation in changes[-40:])
+        if not changes:
+            lines.append("No file changes have been recorded for this task.")
+        elif len(changes) > 40:
+            lines.append(f"({len(changes) - 40} earlier changed paths omitted.)")
+        lines.append("\n=== RECENT COMMAND RESULTS (REFERENCE DATA) ===")
+        for command, code, output in self._feedback_command_history:
+            lines.append(f"Command: `{command}` | Exit code: {code}\nOutput excerpt: {output}")
+        return "\n".join(lines) + "\n\n"
 
     def scan(self):
         self.graph.scan()
@@ -165,17 +198,8 @@ class GraftAgent:
                     "description": desc_m.group(1).strip() if desc_m else ""
                 })
 
-        # Fallback: Tự động trích xuất các lệnh terminal từ code block ```bash / ```sh nếu AI quên thẻ
-        if not command_actions:
-            sh_blocks = re.findall(r'```(?:bash|sh|shell|cmd|powershell)\s*\n(.*?)```', ai_text, re.DOTALL | re.IGNORECASE)
-            for block in sh_blocks:
-                for line in block.strip().splitlines():
-                    clean_line = line.strip().lstrip("$").strip()
-                    if clean_line and not clean_line.startswith("#") and not clean_line.startswith("//"):
-                        command_actions.append({
-                            "command": clean_line,
-                            "description": "Lệnh trích xuất từ phản hồi của AI"
-                        })
+        # Markdown command examples are documentation, not executable actions.
+        # Only explicit RUN_COMMAND blocks can enter the command queue.
 
         # 5. Parse WEB_SEARCH blocks in all common formats
         web_search_actions = []
@@ -601,8 +625,55 @@ class GraftAgent:
         except Exception:
             return ""
 
+    def _requested_context(self, read_requests: List[str], web_queries: List[str]) -> List[str]:
+        """Fetch explicitly requested evidence without applying any actions."""
+        round2_sections = []
+
+        if read_requests:
+            file_results = ["=== REQUESTED FILE CONTENTS (REFERENCE DATA) ==="]
+            for rf in read_requests:
+                resolved = self._resolve_project_file(rf)
+                if resolved and resolved.is_file():
+                    try:
+                        resolved = resolved.resolve()
+                        rel_path = resolved.relative_to(self.root_dir).as_posix()
+                        resolved, _ = self.runtime.policy.resolve_read_path(rel_path)
+                        content = resolved.read_text(encoding="utf-8-sig", errors="replace")
+                        ext = resolved.suffix.lstrip(".") or "text"
+                        file_results.append(
+                            f"File: `{rel_path}` ({len(content.splitlines())} lines):\n"
+                            f"```{ext}\n{content}\n```"
+                        )
+                    except Exception as e:
+                        file_results.append(f"Could not read `{rf}`: {e}")
+                else:
+                    file_results.append(f"File `{rf}` was not found inside the project.")
+            round2_sections.append("\n\n".join(file_results))
+
+        if web_queries:
+            if not getattr(self.config, "web_search", True):
+                round2_sections.append("Web search is disabled. No external results were retrieved.")
+                return round2_sections
+            new_search_results = []
+            for q in web_queries:
+                res = self.runtime.web_search(q, max_results=5)
+                if res.ok and res.data.get("results"):
+                    items = res.data["results"]
+                    lines_out = [f"=== WEB SEARCH RESULTS FOR: `{q}` (REFERENCE DATA) ==="]
+                    for i, it in enumerate(items, 1):
+                        lines_out.append(f"{i}. **{it.get('title')}**\n   - Snippet: {it.get('snippet')}\n   - Source: {it.get('url')}")
+                    new_search_results.append("\n".join(lines_out))
+                else:
+                    new_search_results.append(f"=== WEB SEARCH RESULTS FOR: `{q}` ===\nNo usable results were returned; do not infer that the query was verified.")
+            round2_sections.append("\n\n".join(new_search_results))
+
+        return round2_sections
+
     def plan_and_graft(self, task: str, target_file: str = None, images: Optional[List[str]] = None) -> Dict[str, Any]:
         prompt = build_graft_prompt(task, self.graph, target_file, project_dir=str(self.root_dir))
+        requires_actions = is_action_request(task)
+        if requires_actions:
+            prompt += "\n\n" + ACTION_REQUEST_INSTRUCTION
         snippets = self.extract_context_snippets_from_text(task)
         expert_notes = self.generate_expert_diagnostic_notes(task)
         web_context = self.generate_web_search_context(task)
@@ -618,76 +689,75 @@ class GraftAgent:
                 "tokens": ai_res.get("tokens", {})
             }
 
-        response_text = ai_res.get("response", "")
-        all_actions = self.parse_all_actions(response_text)
+        tokens = dict(ai_res.get("tokens") or {})
+        query_prompt = prompt
+        retrieval_used = False
+        correction_used = False
+        followup_failed = False
 
-        # 1. Xử lý yêu cầu đọc mã nguồn tự chủ từ AI (In-flight Autonomous Code Reading)
-        read_requests = list(all_actions.get("read_files", []))
-        if not read_requests:
-            inspect_matches = re.findall(
-                r'(?:hãy để tôi đọc|để tôi kiểm tra|tôi cần đọc|cần xem nội dung tệp|xem file|kiểm tra file)\s+[`"]?([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)[`"]?',
-                response_text,
-                re.IGNORECASE
-            )
-            for cand in inspect_matches:
-                if self._resolve_project_file(cand):
-                    read_requests.append(cand.strip())
+        # Each pass consumes one of two distinct allowances: evidence retrieval or
+        # a missing-action correction. This cannot retry a prose-only answer forever.
+        while True:
+            response_text = ai_res.get("response", "")
+            all_actions = self.parse_all_actions(response_text)
 
-        # 2. Xử lý yêu cầu tìm kiếm web tự chủ từ AI (In-flight Autonomous Search)
-        web_queries = list(all_actions.get("web_search", []))
-        if not web_queries and re.search(r'(?:tôi sẽ|để tôi|chờ một lát|đang)\s+(?:tra cứu|tìm kiếm|tìm trên mạng)\b', response_text, re.IGNORECASE):
-            fallback_query = self._extract_optimized_search_query(task)
-            if fallback_query:
-                web_queries.append(fallback_query)
-
-        # Nếu có bất kỳ yêu cầu đọc file hoặc tìm kiếm nào từ Lượt 1
-        if read_requests or web_queries:
-            round2_sections = []
-
-            if read_requests:
-                file_results = ["=== REQUESTED FILE CONTENTS (REFERENCE DATA) ==="]
-                for rf in read_requests:
-                    resolved = self._resolve_project_file(rf)
-                    if resolved and resolved.is_file():
-                        try:
-                            content = resolved.read_text(encoding="utf-8-sig", errors="replace")
-                            rel_path = resolved.relative_to(self.root_dir).as_posix()
-                            ext = resolved.suffix.lstrip(".") or "text"
-                            file_results.append(
-                                f"File: `{rel_path}` ({len(content.splitlines())} lines):\n"
-                                f"```{ext}\n{content}\n```"
-                            )
-                        except Exception as e:
-                            file_results.append(f"Could not read `{rf}`: {e}")
-                    else:
-                        file_results.append(f"File `{rf}` was not found inside the project.")
-                round2_sections.append("\n\n".join(file_results))
-
-            if web_queries:
-                new_search_results = []
-                for q in web_queries:
-                    res = self.runtime.web_search(q, max_results=5)
-                    if res.ok and res.data.get("results"):
-                        items = res.data["results"]
-                        lines_out = [f"=== WEB SEARCH RESULTS FOR: `{q}` (REFERENCE DATA) ==="]
-                        for i, it in enumerate(items, 1):
-                            lines_out.append(f"{i}. **{it.get('title')}**\n   - Snippet: {it.get('snippet')}\n   - Source: {it.get('url')}")
-                        new_search_results.append("\n".join(lines_out))
-                    else:
-                        new_search_results.append(f"=== WEB SEARCH RESULTS FOR: `{q}` ===\nNo usable results were returned; do not infer that the query was verified.")
-                round2_sections.append("\n\n".join(new_search_results))
-
-            if round2_sections:
-                followup_prompt = (
-                    f"{prompt}\n\n"
-                    f"[YOUR PREVIOUS DRAFT; ACTIONS NOT YET APPLIED]:\n{response_text}\n\n"
-                    + "\n\n".join(round2_sections)
-                    + "\n\n" + CONTEXT_FOLLOWUP_INSTRUCTION
+            # 1. Xử lý yêu cầu đọc mã nguồn tự chủ từ AI (In-flight Autonomous Code Reading)
+            read_requests = list(all_actions.get("read_files", []))
+            if not read_requests:
+                inspect_matches = re.findall(
+                    r'(?:hãy để tôi đọc|để tôi kiểm tra|tôi cần đọc|cần xem nội dung tệp|xem file|kiểm tra file)\s+[`"]?([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)[`"]?',
+                    response_text,
+                    re.IGNORECASE
                 )
-                ai_res_round2 = self.client.query_ai(followup_prompt, system_prompt=sys_instruction, images=images)
-                if ai_res_round2.get("success") and ai_res_round2.get("response"):
-                    response_text = ai_res_round2["response"]
-                    all_actions = self.parse_all_actions(response_text)
+                for cand in inspect_matches:
+                    if self._resolve_project_file(cand):
+                        read_requests.append(cand.strip())
+
+            # 2. Xử lý yêu cầu tìm kiếm web tự chủ từ AI (In-flight Autonomous Search)
+            web_queries = list(all_actions.get("web_search", []))
+            if not web_queries and re.search(r'(?:tôi sẽ|để tôi|chờ một lát|đang)\s+(?:tra cứu|tìm kiếm|tìm trên mạng)\b', response_text, re.IGNORECASE):
+                fallback_query = self._extract_optimized_search_query(task)
+                if fallback_query:
+                    web_queries.append(fallback_query)
+
+            has_actions = any(all_actions[kind] for kind in ("graft", "create", "delete", "command"))
+            if (read_requests or web_queries) and not retrieval_used:
+                retrieval_used = True
+                sections = self._requested_context(read_requests, web_queries)
+                followup_instruction = CONTEXT_FOLLOWUP_INSTRUCTION
+            elif requires_actions and not has_actions and not correction_used and not (read_requests or web_queries):
+                correction_used = True
+                sections = []
+                followup_instruction = ACTION_RECOVERY_INSTRUCTION
+                followup_instruction += (
+                    "\nRetrieval is exhausted; explain any essential missing context."
+                    if retrieval_used else
+                    "\nOne retrieval pass is available: request missing files/searches together if needed."
+                )
+            else:
+                break
+
+            query_prompt += (
+                f"\n\n[YOUR PREVIOUS DRAFT; ACTIONS NOT YET APPLIED]:\n{response_text}\n\n"
+                + "\n\n".join(sections) + "\n\n" + followup_instruction
+            )
+            next_result = self.client.query_ai(query_prompt, system_prompt=sys_instruction, images=images)
+            for key, value in (next_result.get("tokens") or {}).items():
+                if isinstance(value, (int, float)):
+                    tokens[key] = tokens.get(key, 0) + value
+            if not next_result.get("success") or not next_result.get("response"):
+                followup_failed = True
+                break
+            ai_res = next_result
+
+        action_warning = ""
+        if requires_actions and not any(all_actions[kind] for kind in ("graft", "create", "delete", "command")):
+            action_warning = (
+                "AI chưa cung cấp thao tác tạo/sửa tệp hoặc chạy lệnh để ứng dụng thực hiện. "
+                "Chưa có hành động nào được thực thi; xem phản hồi bên trên để biết phần còn thiếu."
+            )
+            if followup_failed:
+                action_warning += " Lượt yêu cầu AI bổ sung hành động không nhận được phản hồi hợp lệ."
 
         clean_text = self.clean_ai_response(response_text)
         if not clean_text:
@@ -747,11 +817,16 @@ class GraftAgent:
             "create_files": all_actions["create"],
             "delete_files": all_actions["delete"],
             "commands": all_actions["command"],
-            "tokens": ai_res.get("tokens", {})
+            "tokens": tokens,
+            "action_warning": action_warning,
         }
 
     def analyze_log_and_plan_next(self, goal: str, last_cmd: str, exit_code: int, log_text: str) -> Dict[str, Any]:
         tail_log = log_text[-4000:] if len(log_text) > 4000 else log_text
+        if len(log_text) > 4000:
+            tail_log = f"[Earlier {len(log_text) - 4000} characters omitted.]\n" + tail_log
+        self._feedback_command_history.append((last_cmd, exit_code, log_text[-600:]))
+        progress_context = self._feedback_progress_context()
 
         # 1. Chẩn đoán môi trường & thư mục dự án
         doctor_section = ""
@@ -803,7 +878,7 @@ class GraftAgent:
 
         snippets = self.extract_context_snippets_from_text(log_text)
         expert_notes = self.generate_expert_diagnostic_notes(log_text + "\n" + goal)
-        prompt = f"""{expert_notes}{doctor_section}{file_section}{script_snippet}{snippets}=== ORIGINAL USER GOAL ===
+        prompt = f"""{expert_notes}{doctor_section}{file_section}{progress_context}{script_snippet}{snippets}=== ORIGINAL USER GOAL ===
 {goal}
 
 === COMMAND RESULT ===
@@ -829,6 +904,33 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
 
         response_text = ai_res.get("response", "")
         all_actions = self.parse_all_actions(response_text)
+        tokens = dict(ai_res.get("tokens") or {})
+        if all_actions["read_files"] or all_actions["web_search"]:
+            # A draft requesting evidence is never executable. Resolve the whole
+            # batch directly, outside the terminal's truncated stdout buffer.
+            sections = self._requested_context(all_actions["read_files"], all_actions["web_search"])
+            followup_prompt = (
+                prompt + f"\n\n[YOUR PREVIOUS DRAFT; ACTIONS NOT YET APPLIED]:\n{response_text}\n\n"
+                + "\n\n".join(sections) + "\n\n" + CONTEXT_FOLLOWUP_INSTRUCTION
+            )
+            next_result = self.client.query_ai(followup_prompt, system_prompt=sys_instruction)
+            for key, value in (next_result.get("tokens") or {}).items():
+                if isinstance(value, (int, float)):
+                    tokens[key] = tokens.get(key, 0) + value
+            if not next_result.get("success") or not next_result.get("response"):
+                return {
+                    "success": False,
+                    "error": next_result.get("error") or "Không nhận được phản hồi sau khi đọc ngữ cảnh sửa lỗi.",
+                    "tokens": tokens,
+                }
+            response_text = next_result["response"]
+            all_actions = self.parse_all_actions(response_text)
+            if all_actions["read_files"] or all_actions["web_search"]:
+                return {
+                    "success": False,
+                    "error": "Đã dừng phân tích log: AI tiếp tục yêu cầu ngữ cảnh sau lượt đọc bổ sung. Chưa thực thi các đề xuất trong lượt này.",
+                    "tokens": tokens,
+                }
         clean_text = self.clean_ai_response(response_text)
 
         graft_results = []
@@ -874,14 +976,16 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
             "create_files": all_actions["create"],
             "delete_files": all_actions["delete"],
             "commands": all_actions["command"],
-            "tokens": ai_res.get("tokens", {})
+            "tokens": tokens
         }
 
     def create_new_file(self, rel_path: str, code: str) -> Tuple[bool, str]:
         fpath = self.root_dir / rel_path
         try:
             fpath.parent.mkdir(parents=True, exist_ok=True)
-            if fpath.exists():
+            existed = fpath.exists()
+            previous_bytes = fpath.read_bytes() if existed else None
+            if existed:
                 orig_code = fpath.read_text(encoding="utf-8-sig", errors="replace")
                 self.history_backups.append({
                     "type": "modify",
@@ -894,6 +998,8 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
                     "file": str(rel_path)
                 })
             fpath.write_text(code, encoding="utf-8")
+            if previous_bytes != fpath.read_bytes():
+                self._record_file_change(rel_path, "modified" if existed else "created")
             self.scan()
             return True, f"Đã tạo file thành công: {rel_path}"
         except Exception as e:
@@ -911,6 +1017,7 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
                 "previous_content": orig_code
             })
             fpath.unlink()
+            self._record_file_change(rel_path, "deleted")
             self.scan()
             return True, f"Đã xóa file an toàn: {rel_path}"
         except Exception as e:
@@ -919,12 +1026,15 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
     def apply_action(self, action_result: Dict[str, Any]) -> Tuple[bool, str]:
         fpath = self.root_dir / action_result["file"]
         try:
+            previous_bytes = fpath.read_bytes() if fpath.exists() else None
             self.history_backups.append({
                 "type": "modify",
                 "file": action_result["file"],
                 "previous_content": action_result["original_code"]
             })
             fpath.write_text(action_result["new_code"], encoding="utf-8")
+            if previous_bytes != fpath.read_bytes():
+                self._record_file_change(action_result["file"], "modified" if previous_bytes is not None else "created")
             self.scan()
             return True, f"Đã lưu cấy ghép vào: {action_result['file']}"
         except Exception as e:
@@ -942,11 +1052,15 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
             if b_type == "create":
                 if fpath.exists():
                     fpath.unlink()
+                    self._record_file_change(backup["file"], "deleted by undo")
                 self.scan()
                 return True, f"Đã xóa file vừa tạo: {backup['file']}"
             elif b_type in ("modify", "delete"):
                 fpath.parent.mkdir(parents=True, exist_ok=True)
+                previous_bytes = fpath.read_bytes() if fpath.exists() else None
                 fpath.write_text(backup["previous_content"], encoding="utf-8")
+                if previous_bytes != fpath.read_bytes():
+                    self._record_file_change(backup["file"], "restored by undo")
                 self.scan()
                 return True, f"Đã phục hồi trạng thái cũ của: {backup['file']}"
             return False, "Loại sao lưu không hợp lệ"

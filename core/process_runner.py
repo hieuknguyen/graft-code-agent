@@ -104,6 +104,15 @@ class ProcessRunner(QObject):
                 return False
 
         program, arguments = self._build_invocation(normalized_shell, command)
+        native_arguments = ""
+        if os.name == "nt" and program == "cmd.exe":
+            # QProcess quotes argument lists for CommandLineToArgvW, but CMD
+            # uses different rules: the inserted backslashes corrupt quotes in
+            # python -c, paths, and nested PowerShell commands. Pass its command
+            # line verbatim, with one outer quote pair consumed by /s /c.
+            # https://doc.qt.io/qt-6/qprocess.html#setNativeArguments
+            native_arguments = " ".join(arguments[:-1]) + f' "{arguments[-1]}"'
+            arguments = []
 
         self.current_cmd = command
         self.current_shell = normalized_shell
@@ -116,6 +125,7 @@ class ProcessRunner(QObject):
             "shell": normalized_shell,
             "program": program,
             "arguments": list(arguments),
+            "native_arguments": native_arguments,
             "started_at": None,
             "finished_at": None,
             "pid": None,
@@ -126,6 +136,10 @@ class ProcessRunner(QObject):
         self.process.setWorkingDirectory(str(working_directory))
         self.process.setProgram(program)
         self.process.setArguments(arguments)
+        if os.name == "nt":
+            # A QProcess is reused when switching shells. Never carry the last
+            # CMD command into a later PowerShell (or direct program) invocation.
+            self.process.setNativeArguments(native_arguments)
         self.process.start()
         return True
 

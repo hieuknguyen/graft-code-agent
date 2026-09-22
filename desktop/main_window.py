@@ -10,6 +10,7 @@ from PySide6.QtGui import QAction
 
 from config import load_config, save_config, AppConfig
 from core.agent import GraftAgent
+from core.feedback_guard import FeedbackLoopGuard
 from core.process_runner import ProcessRunner
 from core.session_manager import SessionManager
 from desktop.theme import DARK_STYLESHEET
@@ -40,9 +41,11 @@ class MainWindow(QMainWindow):
         self.pending_creates = []
         self.feedback_loop_active = False
         self.feedback_loop_count = 0
+        self.feedback_guard = FeedbackLoopGuard()
         self.max_feedback_loops = getattr(self.config, "max_feedback_loops", 0)
         self.command_queue = []
         self.loop_goal = ""
+        self._automation_generation = 0
 
         self.process_runner = ProcessRunner(self)
         self.process_runner.output_received.connect(self.on_process_output)
@@ -483,6 +486,9 @@ class MainWindow(QMainWindow):
 
         self.current_task = task
         self.loop_goal = task
+        self.agent.begin_task()
+        self.feedback_guard.reset(self.agent.feedback_progress_revision)
+        self._cancel_automatic_followup()
         self.feedback_loop_count = 0
         self.feedback_loop_active = True
         self.editor.chat_view.add_user_message(task, images=images)
@@ -552,7 +558,7 @@ class MainWindow(QMainWindow):
             delete_files=delete_files,
             commands=commands,
             tokens=tokens,
-            auto_applied=is_auto
+            auto_applied=is_auto and bool(actions or create_files)
         )
 
         if actions and not is_auto:
@@ -574,7 +580,7 @@ class MainWindow(QMainWindow):
                 f"• Đang thực thi lệnh: <code>{first_cmd}</code>{queue_info}<br>"
                 f"• <i>Hệ thống đang xử lý ngầm (đang tải/cài đặt). Khi lệnh kết thúc, AI sẽ <b>tự động phân tích log và chạy tiếp bước sau</b> mà bạn không cần phải gõ lệnh tiếp tục!</i>"
             )
-            QTimer.singleShot(600, lambda: self.run_terminal_command(first_cmd))
+            self._schedule_automatic_command(first_cmd, 600)
         elif (actions or create_files) and is_auto and any(kw in task_lower for kw in ["chạy", "run", "khởi động", "start"]):
             try:
                 insp = self.agent.doctor()
@@ -586,13 +592,18 @@ class MainWindow(QMainWindow):
                         "🚀 TỰ ĐỘNG KHỞI CHẠY MÁY CHỦ SAU KHI SỬA FILE",
                         f"Đã cập nhật mã nguồn thành công. Đang tự động khởi chạy máy chủ: <code>{run_cmd}</code>..."
                     )
-                    QTimer.singleShot(600, lambda: self.run_terminal_command(run_cmd))
+                    self._schedule_automatic_command(run_cmd, 600)
             except Exception:
                 pass
         elif commands:
             self.status.showMessage(f"AI đề xuất {len(commands)} lệnh Terminal. Nhấn vào thẻ lệnh trong Chat để chạy.")
         elif not actions and not create_files:
-            self.status.showMessage("AI đã phản hồi xong.")
+            self._cancel_automatic_followup()
+            if res.get("action_warning"):
+                self.status.showMessage("Chưa có thao tác để thực hiện yêu cầu.")
+                self.editor.chat_view.add_system_message("CHƯA CÓ HÀNH ĐỘNG THỰC THI", res["action_warning"])
+            else:
+                self.status.showMessage("AI đã phản hồi xong.")
 
     def on_graft_error(self, err: str):
         self.prompt.btn_graft.setEnabled(True)
@@ -691,20 +702,49 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"Tiến trình kết thúc: {status_text}")
 
     def on_stop_process_requested(self):
-        self.command_queue.clear()
-        self.feedback_loop_active = False
+        self._cancel_automatic_followup()
         self.process_runner.kill_process()
         self.editor.chat_view.add_system_message(
             "⏹ ĐÃ DỪNG TIẾN TRÌNH",
             "Bạn đã chủ động dừng tiến trình. Toàn bộ hàng đợi lệnh và vòng lặp tự động đã được kết thúc."
         )
 
+    def _cancel_automatic_followup(self):
+        self.feedback_loop_active = False
+        self.command_queue.clear()
+        self._automation_generation += 1
+
+    def _schedule_automatic_command(self, cmd: str, delay_ms: int):
+        generation = self._automation_generation
+
+        def run_if_current():
+            if self.feedback_loop_active and generation == self._automation_generation:
+                self.run_terminal_command(cmd)
+
+        QTimer.singleShot(delay_ms, run_if_current)
+
+    def _feedback_result_is_current(self):
+        worker = self.sender()
+        generation = getattr(worker, "automation_generation", self._automation_generation)
+        return self.feedback_loop_active and generation == self._automation_generation
+
+    def _terminal_feedback_can_continue(self, cmd: str) -> bool:
+        reason = self.feedback_guard.observe(cmd, self.agent.feedback_progress_revision)
+        if reason is None:
+            return True
+        self._cancel_automatic_followup()
+        self.status.showMessage("Đã dừng tự động: lặp lệnh mà không có tiến triển.")
+        self.editor.chat_view.add_system_message("⏹ ĐÃ DỪNG VÒNG LẶP KHÔNG TIẾN TRIỂN", reason)
+        return False
+
     def on_command_completed(self, cmd: str, exit_code: int, full_log: str):
         if not self.feedback_loop_active or not self.prompt.chk_feedback.isChecked():
             return
 
         # 1. Nếu còn lệnh trong hàng đợi do AI đã xuất ra -> Tiếp tục chạy lệnh tiếp theo ngay lập tức
-        if self.command_queue:
+        if self.command_queue and exit_code == 0:
+            if not self._terminal_feedback_can_continue(cmd):
+                return
             next_cmd = self.command_queue.pop(0)
             queue_info = f"<br>• <i>(Còn {len(self.command_queue)} lệnh đang chờ trong hàng đợi)</i>" if self.command_queue else ""
             self.editor.chat_view.add_system_message(
@@ -712,41 +752,51 @@ class MainWindow(QMainWindow):
                 f"• Lệnh vừa hoàn tất: <code>{cmd}</code> (Mã thoát: {exit_code})<br>"
                 f"• Đang thực thi: <code>{next_cmd}</code>{queue_info}"
             )
-            QTimer.singleShot(600, lambda: self.run_terminal_command(next_cmd))
+            self._schedule_automatic_command(next_cmd, 600)
             return
+
+        # A failed prerequisite invalidates the remaining queued steps.
+        self.command_queue.clear()
 
         # 2. Khi hàng đợi rỗng: Kiểm tra điều kiện hoàn tất hoặc chuyển sang vòng lặp phản hồi
         cmd_clean = cmd.strip()
         cmd_lower = cmd_clean.lower()
 
-        is_script_run = bool(re.search(r'(?:python(?:\.exe)?|node(?:\.exe)?)\s+([^\s;&|]+\.(?:py|js))', cmd_clean, re.IGNORECASE))
+        is_script_run = bool(re.search(
+            r"(?:^|[\\/\s\"'])(?:python(?:w|\d+(?:\.\d+)?)?|py|node)(?:\.exe)?[\"']?\s+"
+            r"(?:-[^\s]+\s+)*(?:\"[^\"]+\.(?:pyw?|[cm]?js)\"|'[^']+\.(?:pyw?|[cm]?js)'|[^\s;&|]+\.(?:pyw?|[cm]?js))(?=\s|$)",
+            cmd_clean, re.IGNORECASE,
+        ))
         is_app_keyword = any(kw in cmd_lower for kw in ["main.py", "app.py", "run.py", "gui.py", "start.py", "index.js", "npm start", "run.bat"])
-        is_helper_cmd = any(h in cmd_lower for h in [
-            "pip ", "pip.exe", "install", "pytest", "unittest",
-            "dir", "cat ", "type ", "echo ", "get-content", "findstr", "grep",
-            "git ", "curl", "wget", "composer ", "node_modules", "npm install"
-        ])
+        is_helper_cmd = bool(re.search(
+            r"(?:^|[\s\\/\"'])(?:pip\d*|install|pytest|unittest|dir|cat|type|echo|"
+            r"get-content|findstr|grep|git|curl|wget|composer)(?:\.exe)?(?=[\s\"']|$)",
+            cmd_lower,
+        ))
 
         has_critical_error = bool(re.search(r'Traceback \(most recent call last\):|ModuleNotFoundError:|ImportError:|SyntaxError:', full_log))
 
-        # Chỉ ngắt vòng lặp khi người dùng có cấu hình giới hạn bước (> 0)
-        # Nếu max_feedback_loops == 0 (mặc định không giới hạn): AI được đọc log thực tế để tự quyết định đã hoàn tất mục tiêu hay cần chạy lệnh tiếp theo!
-        if self.max_feedback_loops and self.max_feedback_loops > 0:
-            if (is_script_run or is_app_keyword) and not is_helper_cmd and exit_code == 0 and not has_critical_error:
-                self.feedback_loop_active = False
-                self.editor.chat_view.add_system_message(
-                    "🎉 ỨNG DỤNG ĐÃ HOÀN TẤT PHIÊN LÀM VIỆC",
-                    f"Tiến trình <code>{cmd}</code> đã kết thúc thành công (Mã thoát: 0).<br>"
-                    "Người dùng đã đóng ứng dụng hoặc tiến trình hoàn tất bình thường.<br>"
-                    "Hệ thống đã tự động dừng vòng lặp để không tự động mở lại ứng dụng."
-                )
-                return
+        # A completed app session is a stop boundary even in unlimited mode.
+        # This says nothing about feature correctness; it prevents an unsolicited relaunch.
+        if (is_script_run or is_app_keyword) and not is_helper_cmd and exit_code == 0 and not has_critical_error:
+            self._cancel_automatic_followup()
+            self.editor.chat_view.add_system_message(
+                "⏹ PHIÊN CHẠY ỨNG DỤNG ĐÃ KẾT THÚC",
+                f"Tiến trình <code>{cmd}</code> đã kết thúc bình thường (Mã thoát: 0).<br>"
+                "Hệ thống đã dừng vòng lặp tự động và sẽ không tự mở lại ứng dụng. "
+                "Bạn có thể yêu cầu chạy lại khi cần."
+            )
+            return
 
         self.start_agent_feedback_step(cmd, exit_code, full_log)
 
     def start_agent_feedback_step(self, cmd: str, exit_code: int, full_log: str):
+        if not self.feedback_loop_active or not self.prompt.chk_feedback.isChecked():
+            return
+        if not self._terminal_feedback_can_continue(cmd):
+            return
         if self.max_feedback_loops and self.max_feedback_loops > 0 and self.feedback_loop_count >= self.max_feedback_loops:
-            self.feedback_loop_active = False
+            self._cancel_automatic_followup()
             self.editor.chat_view.add_system_message(
                 "⚠️ ĐÃ ĐẠT GIỚI HẠN BƯỚC TỰ ĐỘNG",
                 f"Đã thực hiện xong {self.max_feedback_loops} bước lặp tự động. Bạn có thể kiểm tra Terminal hoặc yêu cầu tiếp."
@@ -770,13 +820,16 @@ class MainWindow(QMainWindow):
         self.feedback_worker = AgentFeedbackWorker(
             self.agent, self.loop_goal, cmd, exit_code, full_log
         )
+        self.feedback_worker.automation_generation = self._automation_generation
         self.feedback_worker.finished.connect(self.on_feedback_finished)
         self.feedback_worker.error.connect(self.on_feedback_error)
         self.feedback_worker.start()
 
     def on_feedback_finished(self, res: dict):
+        if not self._feedback_result_is_current():
+            return
         if not res.get("success"):
-            self.feedback_loop_active = False
+            self._cancel_automatic_followup()
             self.editor.chat_view.add_system_message("❌ LỖI PHÂN TÍCH LOG", res.get("error", ""))
             return
 
@@ -787,24 +840,18 @@ class MainWindow(QMainWindow):
         delete_files = res.get("delete_files", [])
         tokens = res.get("tokens", {})
 
-        self.editor.chat_view.add_ai_message(
-            ai_response,
-            graft_actions=actions,
-            create_files=create_files,
-            delete_files=delete_files,
-            commands=commands,
-            tokens=tokens,
-            auto_applied=True
-        )
-
+        progress_before = self.agent.feedback_progress_revision
         has_changes = False
         if actions:
             for act in actions:
                 if act.get("success"):
-                    self.agent.apply_action(act)
-                    self.editor.chat_view.add_system_message("🛠️ TỰ ĐỘNG SỬA CODE", f"Đã cấy ghép sửa lỗi vào <code>{act['file']}</code>")
-                    self.prompt.btn_undo.setEnabled(True)
-                    has_changes = True
+                    succ, msg = self.agent.apply_action(act)
+                    if succ:
+                        self.editor.chat_view.add_system_message("🛠️ TỰ ĐỘNG SỬA CODE", f"Đã cấy ghép sửa lỗi vào <code>{act['file']}</code>")
+                        self.prompt.btn_undo.setEnabled(True)
+                        has_changes = True
+                    else:
+                        self.editor.chat_view.add_system_message("❌ KHÔNG THỂ ÁP DỤNG THAY ĐỔI", msg)
 
         if create_files:
             for cf in create_files:
@@ -817,6 +864,16 @@ class MainWindow(QMainWindow):
         if has_changes:
             self.update_codebase_views()
 
+        self.editor.chat_view.add_ai_message(
+            ai_response,
+            graft_actions=actions,
+            create_files=create_files,
+            delete_files=delete_files,
+            commands=commands,
+            tokens=tokens,
+            auto_applied=self.agent.feedback_progress_revision != progress_before,
+        )
+
         if commands:
             self.command_queue = [c["command"] for c in commands]
             next_cmd = self.command_queue.pop(0)
@@ -825,23 +882,25 @@ class MainWindow(QMainWindow):
                 "🚀 TIẾP TỤC CHẠY BƯỚC TIẾP THEO",
                 f"• Lệnh: <code>{next_cmd}</code>{queue_info}"
             )
-            QTimer.singleShot(800, lambda: self.run_terminal_command(next_cmd))
-        elif (actions or create_files) and self.process_runner.current_cmd:
+            self._schedule_automatic_command(next_cmd, 800)
+        elif self.agent.feedback_progress_revision != progress_before and self.process_runner.current_cmd:
             retry_cmd = self.process_runner.current_cmd
             self.editor.chat_view.add_system_message(
                 "🔄 TỰ ĐỘNG KHỞI CHẠY LẠI MÁY CHỦ ĐỂ KIỂM TRA MÃ NGUỒN VỪA SỬA",
                 f"Đã cập nhật mã nguồn thành công. Đang tự động chạy lại lệnh: <code>{retry_cmd}</code> để kiểm tra phản hồi ứng dụng..."
             )
-            QTimer.singleShot(800, lambda: self.run_terminal_command(retry_cmd))
+            self._schedule_automatic_command(retry_cmd, 800)
         else:
-            self.feedback_loop_active = False
+            self._cancel_automatic_followup()
             self.editor.chat_view.add_system_message(
-                "🎉 HOÀN TẤT TIẾN TRÌNH",
-                "AI đã điều phối xong tất cả các bước theo yêu cầu của bạn!"
+                "⏹ ĐÃ DỪNG TỰ ĐỘNG",
+                "Không có bước thực thi tiếp theo. Hãy xem phản hồi và kết quả kiểm tra ở trên."
             )
 
     def on_feedback_error(self, err: str):
-        self.feedback_loop_active = False
+        if not self._feedback_result_is_current():
+            return
+        self._cancel_automatic_followup()
         self.editor.chat_view.add_system_message("❌ LỖI VÒNG LẶP AGENT", str(err))
 
     def on_server_detected(self, cmd: str, server_url: str):
@@ -857,10 +916,15 @@ class MainWindow(QMainWindow):
             self.probe_worker.wait(1000)
 
         self.probe_worker = ServerHealthProbeWorker(server_url, delay_ms=1000)
-        self.probe_worker.finished.connect(lambda res: self.on_probe_finished(cmd, server_url, res))
+        generation = self._automation_generation
+        self.probe_worker.finished.connect(lambda res: self.on_probe_finished(cmd, server_url, res, generation))
         self.probe_worker.start()
 
-    def on_probe_finished(self, cmd: str, server_url: str, res: dict):
+    def on_probe_finished(self, cmd: str, server_url: str, res: dict, generation=None):
+        if generation is not None and generation != self._automation_generation:
+            return
+        if not self.process_runner.is_running() or self.process_runner.current_cmd != cmd:
+            return
         is_healthy = res.get("is_healthy", False)
         status_code = res.get("status_code")
         error_msg = res.get("error", "")
@@ -876,10 +940,8 @@ class MainWindow(QMainWindow):
                 f"• Tiến trình máy chủ đang duy trì ổn định trong Tab Terminal."
             )
         else:
-            if not self.feedback_loop_active:
-                self.feedback_loop_active = True
-                self.feedback_loop_count = 0
-                self.loop_goal = f"Khắc phục lỗi máy chủ {cmd} không phản hồi đúng (HTTP {status_code})"
+            if not self.feedback_loop_active or not self.prompt.chk_feedback.isChecked():
+                return
 
             self.editor.chat_view.add_system_message(
                 f"⚠️ PHÁT HIỆN MÁY CHỦ BÁO LỖI (HTTP {status_code or 'Không kết nối'})",

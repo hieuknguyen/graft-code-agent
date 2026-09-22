@@ -128,8 +128,23 @@ their original language.
 
 The prompts require source-based investigation, focused changes, root-cause diagnosis, and evidence
 before completion claims. They distinguish proposals from applied and verified work. They do not
-change runtime permissions or approval settings. Gateway retrieval currently has one follow-up pass;
-Gemini exposes only its declared tools. Missing evidence must be reported honestly at those limits.
+change runtime permissions or approval settings. Gateway planning allows one retrieval follow-up
+and one correction when a clear action request receives only prose or code examples. The correction
+must return explicit action blocks; ordinary Markdown is never converted into executable commands.
+If no actions are returned, the desktop reports that nothing was executed. Questions and explicit
+explanation-only requests do not trigger this correction. Gemini exposes only its declared tools.
+Missing evidence must be reported honestly at those limits.
+
+Terminal feedback keeps a per-task journal of actual file changes and recent command results,
+and supports one batched `READ_FILE`/enabled `WEB_SEARCH` follow-up. File reads use the project
+read policy and do not pass through the terminal's 4000-character log tail. On Windows, CMD
+receives native arguments so quoted paths, Python inline scripts, and nested PowerShell survive
+Qt's launch boundary.
+
+`max_feedback_loops = 0` still allows unlimited useful steps. A separate guard stops the task
+when the same command or equivalent full-file read occurs four times within twelve command
+completions without an actual file-content change. It clears queued commands and pending automatic
+callbacks. Failed writes and identical-content rewrites do not reset this guard; a new request does.
 
 ## Kiểm thử desktop
 
