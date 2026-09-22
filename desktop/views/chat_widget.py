@@ -14,6 +14,7 @@ class ChatWidget(QWidget):
     action_run_command_clicked = Signal(str)
     action_create_file_clicked = Signal(str)
     action_delete_file_clicked = Signal(str)
+    action_open_file_clicked = Signal(str)
     message_persisted = Signal(dict)
     message_deleted = Signal(int)
     messages_cleared = Signal()
@@ -244,6 +245,35 @@ class ChatWidget(QWidget):
         if render:
             self.render_all()
 
+    def format_system_text(self, text: str) -> str:
+        if not text:
+            return ""
+        # Check if text already contains standard HTML formatting tags
+        has_html = bool(re.search(r"<\s*/?\s*(?:code|br|b|i|a|span|div|p|strong|em|ul|ol|li)\b", text, re.IGNORECASE))
+        if has_html:
+            formatted = text
+            # Ensure <code> tags get clean styling if not already styled
+            formatted = re.sub(
+                r"<code>(?!\s*<code)",
+                "<code style='color:#a8dab5; background-color:#18191d; border:1px solid #333842; padding:1px 5px; border-radius:3px; font-family:Consolas, monospace;'>",
+                formatted
+            )
+            # Ensure <a> tags have link styling if not present
+            formatted = re.sub(
+                r"<a\s+href=",
+                "<a style='color:#818cf8; text-decoration:none; font-weight:bold;' href=",
+                formatted
+            )
+            return formatted
+        else:
+            escaped = html.escape(text)
+            escaped = re.sub(
+                r"`([^`]+)`",
+                r"<code style='color:#a8dab5; background-color:#18191d; border:1px solid #333842; padding:1px 5px; border-radius:3px; font-family:Consolas, monospace;'>\1</code>",
+                escaped
+            )
+            return escaped.replace("\n", "<br>")
+
     def add_system_message(self, title: str, text: str, persist: bool = True, msg_index: Optional[int] = None, render: bool = True):
         msg_dict = {"role": "system", "title": title, "text": text}
         if persist:
@@ -252,9 +282,10 @@ class ChatWidget(QWidget):
 
         idx = msg_index if msg_index is not None else (len(self.raw_messages) - 1)
         header = self._header_row(title, idx)
+        formatted_content = self.format_system_text(text)
         msg_html = self._bubble(
             f"{header}"
-            f"<p style='font-size:12px; color:#c9c9c9; margin:0;'>{html.escape(text)}</p>",
+            f"<div style='font-size:12px; color:#c9c9c9; line-height:1.5; margin:0;'>{formatted_content}</div>",
             "#202020",
             "#4c4c4c",
         )
@@ -340,6 +371,8 @@ class ChatWidget(QWidget):
         <head>
             <style>
                 body {{ background-color: #101010; color: #dedede; margin: 0; padding: 0; }}
+                code {{ font-family: "Cascadia Code", "Consolas", "Courier New", monospace; color: #a8dab5; background-color: #18191d; }}
+                a {{ color: #818cf8; text-decoration: none; }}
             </style>
         </head>
         <body>
@@ -361,6 +394,7 @@ class ChatWidget(QWidget):
     def on_link_clicked(self, url):
         scheme = url.scheme().lower()
         path = unquote(url.path().lstrip("/"))
+        raw_str = url.toString() or url.path()
         if scheme == "runcmd":
             self.action_run_command_clicked.emit(path)
         elif scheme == "graftview":
@@ -371,6 +405,11 @@ class ChatWidget(QWidget):
             self.action_create_file_clicked.emit(path)
         elif scheme == "deletefile":
             self.action_delete_file_clicked.emit(path)
+        elif scheme in ("open_file", "openfile"):
+            self.action_open_file_clicked.emit(path)
+        elif raw_str.startswith(("open_file:", "openfile:")):
+            target = unquote(raw_str.split(":", 1)[1].lstrip("/"))
+            self.action_open_file_clicked.emit(target)
         elif scheme == "deletemsg":
             try:
                 msg_idx = int(path)

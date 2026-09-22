@@ -402,3 +402,34 @@ def test_main_window_cancel_ai_task(window, app):
     assert "ĐÃ HỦY YÊU CẦU" in window.editor.chat_view.browser.toPlainText()
 
 
+def test_system_message_html_formatting_and_open_file(window, app):
+    chat = window.editor.chat_view
+    chat.clear_chat()
+    
+    # Add HTML system message (similar to user's report)
+    raw_html_msg = (
+        "• Đang thực thi lệnh: <code>python plot_btc_weekly.py</code> <br>"
+        "• <i>Hệ thống đang xử lý ngầm. AI sẽ <b>tự động phân tích</b>.</i>"
+    )
+    chat.add_system_message("🚀 ĐANG TỰ ĐỘNG THỰC THI TIẾN TRÌNH", raw_html_msg)
+    app.processEvents()
+
+    plain = chat.browser.toPlainText()
+    # Raw HTML tags should NOT be displayed as visible literal text
+    assert "<code>" not in plain
+    assert "</code>" not in plain
+    assert "<br>" not in plain
+    assert "<i>" not in plain
+    assert "<b>" not in plain
+    # The actual content inside tags must be present
+    assert "python plot_btc_weekly.py" in plain
+    assert "tự động phân tích" in plain
+
+    # Test open_file signal
+    spy = QSignalSpy(chat.action_open_file_clicked)
+    chat.on_link_clicked(QUrl("open_file:src/example.py"))
+    assert spy.count() == 1
+    assert spy.at(0) == ["src/example.py"]
+
+
+

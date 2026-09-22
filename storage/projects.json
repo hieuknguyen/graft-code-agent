@@ -1,9 +1,16 @@
 [
   {
-    "id": "proj_27b7e98dfc",
-    "name": "nguye",
-    "path": "C:\\Users\\nguye",
-    "created_at": "2026-09-22 10:04:29",
-    "updated_at": "2026-09-22 10:04:29"
+    "id": "proj_715e19a8bd",
+    "name": "graft-code-agent",
+    "path": "H:\\graft-code-agent",
+    "created_at": "2026-09-22 10:55:16",
+    "updated_at": "2026-09-22 17:10:00"
+  },
+  {
+    "id": "proj_7cf1b2bcbc",
+    "name": "New folder",
+    "path": "H:\\New folder",
+    "created_at": "2026-09-22 10:57:20",
+    "updated_at": "2026-09-22 16:55:23"
   }
 ]

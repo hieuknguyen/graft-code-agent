@@ -8,7 +8,7 @@ Chế độ này không cần API gateway trung gian. Khóa Gemini chỉ đượ
 
 ### Cài đặt
 
-Cần Python 3.9 trở lên. Cài các thư viện của dự án (bao gồm SDK `google-genai>=2.24.0,<3.0.0`):
+Cần Python 3.10 trở lên để dùng đầy đủ các bộ kiểm tra cú pháp. Cài các thư viện của dự án (bao gồm SDK `google-genai>=2.24.0,<3.0.0`):
 
 ```powershell
 pip install -r requirements.txt
@@ -111,6 +111,102 @@ Chạy bộ kiểm thử phù hợp, nhưng hỏi tôi trước khi thực thi l
 ## Khả năng Graft kế thừa
 
 Dự án vẫn giữ các thành phần AST grafting: lập chỉ mục class/hàm, tạo diff và kiểm tra cú pháp trước khi áp dụng. Chúng hỗ trợ agent giới hạn thay đổi vào phần mã cần thiết thay vì viết lại cả tệp. Một số giao diện desktop/web cũ hướng tới workflow gateway; CLI là cách rõ ràng nhất để sử dụng chế độ Gemini trực tiếp và các bước xác nhận an toàn.
+
+## Công cụ code tích hợp cho AI
+
+AI có thể gọi trực tiếp các công cụ dưới đây qua Gateway, cả khi lập kế hoạch và khi phân tích
+log lỗi. Bộ khai báo Gemini cũng dùng chung các công cụ mới. Cài đầy đủ `requirements.txt`
+để bật bộ kiểm tra cú pháp cho nhiều ngôn ngữ.
+
+| Công cụ | Công dụng |
+| --- | --- |
+| `edit_file` | Sửa một đoạn bằng `path`, `old_text`, `new_text`; ứng dụng tự nhớ phiên bản file đã đọc. |
+| `edit_file_ranges` | Thay/chèn/xóa tối đa 200 khoảng dòng trong file tới 8 MB; không cần gửi lại toàn bộ đoạn cũ. |
+| `find_files` | Tìm đường dẫn theo mẫu như `**/*.py`, có phân trang. |
+| `list_symbols` | Liệt kê hàm, class, method và khoảng dòng trong Python (`.py`, `.pyi`). |
+| `read_symbol` | Đọc một hàm/class Python, gồm decorator; phân biệt các method trùng tên bằng `parent`. |
+| `check_syntax` | Kiểm tra riêng một file trên đĩa theo ngôn ngữ tự nhận diện. Thao tác đọc/sửa đã tự trả thông tin cú pháp. |
+| `propose_edit_file` | Đề xuất thay những đoạn văn bản xác định trong file UTF-8, giữ phần còn lại. |
+
+Các công cụ `project_overview`, `list_files`, `search_project`, `read_file` hiện có cũng gọi được
+qua Gateway. Dùng tìm kiếm văn bản và đọc theo dòng cho các ngôn ngữ ngoài Python. Kết quả đọc
+có hash của file và thông báo nếu bị cắt bớt. File nhạy cảm, đường dẫn ngoài dự án và liên kết
+symbolic/junction bị từ chối.
+
+Ví dụ lời gọi do AI sinh:
+
+```text
+<<<TOOL_CALL
+{"name": "read_symbol", "arguments": {"path": "src/service.py", "symbol": "fetch_data", "parent": "DataService"}}
+<<<END_TOOL_CALL
+```
+
+Mỗi lượt lập kế hoạch/phân tích log có tối đa 4 vòng công cụ, mỗi vòng tối đa 8 lời gọi.
+Lời gọi giống hệt bị lặp sẽ dừng; AI nhận kết quả trước khi đề xuất bước phụ thuộc.
+`propose_edit_file` yêu cầu hash hiện tại cùng danh sách `old_text`/`new_text`: mỗi đoạn cũ phải
+khớp duy nhất, các đoạn không được chồng lấn. Gom các sửa đổi của một file trong một đề xuất.
+Đề xuất xuất hiện trong giao diện áp dụng hiện có, tuân theo chế độ áp dụng đang chọn; nếu file
+đã thay đổi trước lúc lưu, ứng dụng từ chối ghi đè. Đề xuất chưa áp dụng không được tính là đã sửa.
+`read_file` trả thêm `newline_style`; công cụ sửa giữ CRLF cho file dùng CRLF nhất quán trên Windows.
+
+### Sửa file trực tiếp, không dùng terminal
+
+AI đọc file bằng `read_file` hoặc `read_symbol`, rồi gọi `edit_file` với đoạn cũ và đoạn thay thế.
+Không cần truyền hash hoặc viết script sửa file:
+
+```text
+<<<TOOL_CALL
+{"name": "edit_file", "arguments": {"path": "src/service.py", "old_text": "timeout = 5", "new_text": "timeout = 30", "description": "Tăng thời gian chờ"}}
+<<<END_TOOL_CALL
+```
+
+Thay đổi xuất hiện trong giao diện xem và áp dụng hiện có; chế độ tự động áp dụng vẫn hoạt động.
+Đặt `new_text` rỗng để xóa đoạn cũ; để chèn, giữ đoạn làm mốc trong cả nội dung cũ và mới.
+Nếu chưa đọc file hoặc file vừa thay đổi, AI phải đọc lại. Nếu đoạn cũ xuất hiện nhiều lần, AI phải
+thêm ngữ cảnh để xác định đúng vị trí. Dùng `propose_edit_file` để gom nhiều sửa đổi cùng file.
+
+### Sửa file lớn theo khoảng dòng
+
+Sau khi đọc các vùng liên quan bằng `read_file`, AI có thể gửi một đề xuất gồm nhiều vùng:
+
+```text
+<<<TOOL_CALL
+{"name": "edit_file_ranges", "arguments": {"path": "src/service.py", "edits": [{"start_line": 120, "end_line": 180, "new_text": "def fetch_data():\n    return []\n"}, {"start_line": 500, "end_line": 499, "new_text": "# Thêm ghi chú trước dòng 500\n"}], "description": "Cập nhật xử lý dữ liệu"}}
+<<<END_TOOL_CALL
+```
+
+Số dòng bắt đầu từ 1, tính cả hai đầu và luôn dựa trên file gốc vừa đọc. `new_text` rỗng
+xóa vùng; `end_line = start_line - 1` chèn trước dòng đó. Để thêm cuối file, dùng
+`start_line = total_lines + 1`, `end_line = total_lines`. Có thể thay toàn bộ file bằng
+vùng 1 đến `total_lines` nếu đã đọc đầy đủ nội dung. Các vùng không được chồng lấn.
+
+Công cụ giữ phần không sửa, UTF-8 BOM và CRLF của file dùng CRLF nhất quán. Cả đề xuất
+được kiểm tra trước khi tạo thẻ áp dụng; file thay đổi sau lần đọc sẽ bị từ chối để AI đọc lại.
+Giới hạn đọc/sửa là 8 MB mỗi file. Mỗi lần đọc trả tối đa 400 dòng/48K ký tự; dùng
+`next_start_line` để đọc tiếp. `partial_line` báo dòng quá dài chưa hiển thị hết.
+
+### Tự phản hồi lỗi cú pháp cho AI
+
+`read_file` kiểm tra nội dung hiện tại; `edit_file`, `edit_file_ranges`, `propose_edit_file`
+và `propose_write_file` kiểm tra toàn bộ nội dung dự kiến. Kết quả tự kèm trường `syntax`
+gồm trạng thái, ngôn ngữ, dòng/cột, thông báo và đoạn code lỗi. Bản sửa không hợp lệ bị
+từ chối trước khi tạo đề xuất: AI nhận ngay `SYNTAX_ERROR` và sửa lại dựa trên file gốc,
+không cần gọi thêm công cụ hoặc chạy lệnh kiểm tra syntax. Khi áp dụng, app kiểm tra lại.
+Các khối `CREATE_FILE`/`GRAFT_ACTION` kế thừa cũng nhận phản hồi tự động với tối đa hai
+lượt sửa cú pháp; hết giới hạn thì dừng và hiển thị lỗi.
+
+App chọn bộ kiểm tra theo phần mở rộng/tên file trong dự án, hỗ trợ Python, JS/JSX,
+TS/TSX, PHP, Go, Rust, Java, C/C++, C#, CSS/HTML, SQL và nhiều ngôn ngữ khác; cấu hình
+JSON, JSONC (gồm tsconfig/jsconfig và cấu hình `.vscode`), YAML, TOML cũng được xử lý.
+Bộ [tree-sitter-language-pack 0.13.0](https://pypi.org/project/tree-sitter-language-pack/0.13.0/)
+được khóa phiên bản để dùng các grammar đi kèm, không tải parser qua mạng lúc sửa file.
+Không chạy code dự án để kiểm tra cú pháp.
+
+Định dạng chưa hỗ trợ, template Blade, parser thiếu hoặc vượt giới hạn được trả là
+`unavailable` và hiển thị cảnh báo, không bị coi là đã kiểm tra thành công. Đây là kiểm
+tra cú pháp khi đọc/đề xuất/ghi file, không phải trình theo dõi nền toàn bộ dự án. Nó không
+thay thế kiểm tra kiểu, import, build hay test; phần code nhúng trong HTML/Vue hoặc cú pháp
+đặc thù framework có thể cần công cụ riêng của dự án.
 
 ## AI prompts
 

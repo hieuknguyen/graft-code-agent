@@ -30,7 +30,8 @@ MAX_READ_LINES = 400
 MAX_READ_CHARS = 48 * 1024
 MAX_SEARCH_FILES = 2_000
 MAX_SEARCH_RESULTS = 80
-MAX_WRITE_BYTES = 2 * 1024 * 1024
+MAX_EDIT_FILE_BYTES = 8 * 1024 * 1024
+MAX_WRITE_BYTES = MAX_EDIT_FILE_BYTES
 PROPOSAL_TTL_SECONDS = 30 * 60
 
 
@@ -55,6 +56,7 @@ class ToolResult:
         if self.ok:
             result.update(self.data)
         else:
+            result.update(self.data)
             result.update({"error": self.error or "Unknown tool error", "error_code": self.error_code or "TOOL_ERROR"})
         return result
 
@@ -127,6 +129,13 @@ class WorkspacePolicy:
         if any(part.lower() in self.IGNORED_DIRS for part in relative.parts):
             raise ToolRuntimeError("PATH_DENIED", "Thư mục này bị loại khỏi ngữ cảnh của agent.")
 
+    def _check_links(self, relative: Path) -> None:
+        candidate = self.root
+        for part in relative.parts:
+            candidate = candidate / part
+            if candidate.is_symlink() or (hasattr(candidate, "is_junction") and candidate.is_junction()):
+                raise ToolRuntimeError("PATH_DENIED", "Không cho phép truy cập symbolic link hoặc junction qua công cụ file.")
+
     def is_sensitive(self, relative: Path) -> bool:
         name = relative.name.lower()
         if name in self.SENSITIVE_FILENAMES or name.startswith(".env."):
@@ -138,7 +147,12 @@ class WorkspacePolicy:
         self._check_segments(relative)
         if self.is_sensitive(relative):
             raise ToolRuntimeError("SENSITIVE_FILE", "Agent không được đọc file chứa bí mật hoặc private key.")
+        self._check_links(relative)
         candidate = self._ensure_inside_root(self.root / relative)
+        resolved_relative = candidate.relative_to(self.root)
+        self._check_segments(resolved_relative)
+        if self.is_sensitive(resolved_relative):
+            raise ToolRuntimeError("SENSITIVE_FILE", "Agent không được đọc file chứa bí mật hoặc private key.")
         if not candidate.exists() or not candidate.is_file():
             raise ToolRuntimeError("NOT_FOUND", "Không tìm thấy file trong dự án.")
         if candidate.is_symlink():
@@ -150,7 +164,12 @@ class WorkspacePolicy:
         self._check_segments(relative)
         if self.is_sensitive(relative):
             raise ToolRuntimeError("SENSITIVE_FILE", "Agent không được thay đổi file chứa bí mật hoặc private key.")
+        self._check_links(relative)
         candidate = self._ensure_inside_root(self.root / relative)
+        resolved_relative = candidate.relative_to(self.root)
+        self._check_segments(resolved_relative)
+        if self.is_sensitive(resolved_relative):
+            raise ToolRuntimeError("SENSITIVE_FILE", "Agent không được thay đổi file chứa bí mật hoặc private key.")
         parent = self._ensure_inside_root(candidate.parent)
         if candidate.exists() and candidate.is_symlink():
             raise ToolRuntimeError("PATH_DENIED", "Không cho phép ghi đè symbolic link.")
@@ -161,6 +180,7 @@ class WorkspacePolicy:
     def resolve_directory(self, raw_path: str = "") -> Tuple[Path, Path]:
         relative = self._normalise_relative_path(raw_path, allow_empty=True)
         self._check_segments(relative)
+        self._check_links(relative)
         candidate = self._ensure_inside_root(self.root / relative)
         if not candidate.exists() or not candidate.is_dir():
             raise ToolRuntimeError("NOT_FOUND", "Không tìm thấy thư mục trong dự án.")
@@ -181,7 +201,25 @@ class ToolRuntime:
         self.policy = WorkspacePolicy(root_dir)
         self.root_dir = self.policy.root
         self._proposals: Dict[str, PendingProposal] = {}
+        self._read_snapshots: Dict[str, str] = {}
         self.audit_path = self.root_dir / ".graft" / "audit.jsonl"
+
+    def _read_key(self, path: str) -> str:
+        return os.path.normcase(self.policy._normalise_relative_path(path).as_posix())
+
+    def remember_read(self, path: str, sha256: str) -> None:
+        """Remember a version only after returning its source to the model."""
+        key = self._read_key(path)
+        self._read_snapshots.pop(key, None)
+        self._read_snapshots[key] = sha256
+        while len(self._read_snapshots) > 128:
+            self._read_snapshots.pop(next(iter(self._read_snapshots)))
+
+    def forget_read(self, path: str) -> None:
+        try:
+            self._read_snapshots.pop(self._read_key(path), None)
+        except ToolRuntimeError:
+            pass
 
     @staticmethod
     def _sha256_bytes(content: bytes) -> str:
@@ -294,12 +332,16 @@ class ToolRuntime:
             return ToolResult(False, error=str(exc), error_code="LIST_FAILED")
 
     def read_file(self, path: str, start_line: int = 1, end_line: Optional[int] = None) -> ToolResult:
+        self.forget_read(path)
         try:
             full_path, relative = self.policy.resolve_read_path(path)
             size = full_path.stat().st_size
-            if size > MAX_READ_BYTES:
-                raise ToolRuntimeError("TOO_LARGE", f"File lớn hơn giới hạn đọc {MAX_READ_BYTES // 1024} KB; hãy đọc theo phần cụ thể.")
-            raw = full_path.read_bytes()
+            if size > MAX_EDIT_FILE_BYTES:
+                raise ToolRuntimeError("TOO_LARGE", "File vượt giới hạn đọc/sửa 8 MB.")
+            with full_path.open("rb") as handle:
+                raw = handle.read(MAX_EDIT_FILE_BYTES + 1)
+            if len(raw) > MAX_EDIT_FILE_BYTES:
+                raise ToolRuntimeError("TOO_LARGE", "File vượt giới hạn đọc/sửa 8 MB.")
             if self._is_binary(raw):
                 raise ToolRuntimeError("BINARY", "Không thể đưa file nhị phân vào ngữ cảnh model.")
             source_hash = self._sha256_bytes(raw)
@@ -312,19 +354,38 @@ class ToolRuntime:
                 raise ToolRuntimeError("INVALID_RANGE", "Dòng bắt đầu/kết thúc phải là số nguyên.")
             end = min(len(lines), max(start, end), start + MAX_READ_LINES - 1)
             selected = lines[start - 1:end]
-            numbered = "\n".join(f"{number:>5} | {line}" for number, line in enumerate(selected, start))
-            redacted = self.redact_text(numbered)
-            if len(redacted) > MAX_READ_CHARS:
-                redacted = redacted[:MAX_READ_CHARS] + "\n… [đã cắt bớt vì giới hạn ngữ cảnh]"
+            # Stop at complete lines so pagination never silently skips source.
+            rendered = []
+            char_count = 0
+            partial_line = None
+            for number, line in enumerate(selected, start):
+                row = self.redact_text(f"{number:>5} | {line}")
+                if char_count + len(row) + bool(rendered) > MAX_READ_CHARS:
+                    if not rendered:
+                        rendered.append(row[:MAX_READ_CHARS])
+                        partial_line = number
+                    break
+                rendered.append(row)
+                char_count += len(row) + (len(rendered) > 1)
+            end = start + len(rendered) - 1 if rendered else min(end, start - 1)
+            redacted = "\n".join(rendered)
+            if partial_line is not None:
+                redacted += "\n… [dòng quá dài, chỉ hiển thị một phần; không suy đoán phần còn lại]"
             self._audit("read_file", path=relative.as_posix(), start_line=start, end_line=end)
+            if selected or (not lines and start == 1):
+                self.remember_read(relative.as_posix(), source_hash)
             return ToolResult(True, {
                 "path": relative.as_posix(),
                 "sha256": source_hash,
+                "newline_style": "crlf" if b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"") else ("mixed" if b"\r\n" in raw else "lf"),
                 "total_lines": len(lines),
                 "start_line": start,
                 "end_line": end,
                 "content": redacted,
-                "truncated": end < len(lines) or len(redacted) >= MAX_READ_CHARS,
+                "truncated": end < len(lines) or partial_line is not None,
+                "next_start_line": end + 1 if end < len(lines) else None,
+                "partial_line": partial_line,
+                "syntax": self.inspect_syntax(relative.as_posix(), text),
             })
         except ToolRuntimeError as exc:
             return ToolResult(False, error=exc.message, error_code=exc.code)
@@ -381,6 +442,83 @@ class ToolRuntime:
         self._audit("proposal_created", proposal_id=proposal.proposal_id, kind=kind, path=payload.get("path"))
         return proposal
 
+    def find_files(self, pattern: str, max_results: int = 100, offset: int = 0) -> ToolResult:
+        from .code_tools import CodeTools
+        return CodeTools(self).find_files(pattern, max_results=max_results, offset=offset)
+
+    def list_symbols(self, path: str) -> ToolResult:
+        from .code_tools import CodeTools
+        return CodeTools(self).list_symbols(path)
+
+    def read_symbol(self, path: str, symbol: str, parent: str = "") -> ToolResult:
+        from .code_tools import CodeTools
+        return CodeTools(self).read_symbol(path, symbol, parent=parent)
+
+    def check_syntax(self, path: str) -> ToolResult:
+        from .code_tools import CodeTools
+        return CodeTools(self).check_syntax(path)
+
+    def propose_edit_file(self, path: str, edits: List[Dict[str, str]], expected_sha256: str, description: str = "") -> ToolResult:
+        from .edit_tools import propose_edit_file
+        return propose_edit_file(self, path, edits, expected_sha256, description)
+
+    def edit_file(self, path: str, old_text: str, new_text: str, description: str = "") -> ToolResult:
+        """Prepare a single replacement using the last observed file version."""
+        try:
+            key = self._read_key(path)
+            expected_sha256 = self._read_snapshots.get(key)
+            try:
+                self.policy.resolve_read_path(path)
+            except ToolRuntimeError as exc:
+                if expected_sha256 and exc.code == "NOT_FOUND":
+                    self.forget_read(path)
+                    raise ToolRuntimeError("STALE_CONTENT", "File đã bị xóa từ lần đọc trước. Hãy đọc lại trước khi sửa.")
+                raise
+            if not expected_sha256:
+                raise ToolRuntimeError("READ_REQUIRED", "Hãy dùng read_file hoặc read_symbol đọc đoạn cần sửa trước, rồi gọi lại edit_file. Không cần truyền hash.")
+            result = self.propose_edit_file(
+                path, [{"old_text": old_text, "new_text": new_text}], expected_sha256, description,
+            )
+            if result.error_code in {"STALE_CONTENT", "NOT_FOUND"}:
+                self.forget_read(path)
+                return ToolResult(False, error="File đã thay đổi từ lần đọc trước. Hãy đọc lại file rồi đề xuất sửa trên nội dung mới.", error_code="STALE_CONTENT")
+            if result.ok:
+                result.data["status"] = "pending"
+                result.data["summary"] = "Đã chuẩn bị sửa file bằng công cụ nội bộ, không chạy terminal. Thay đổi đang chờ chế độ áp dụng của ứng dụng."
+            return result
+        except ToolRuntimeError as exc:
+            return ToolResult(False, error=exc.message, error_code=exc.code)
+        except OSError as exc:
+            return ToolResult(False, error=str(exc), error_code="EDIT_PROPOSAL_FAILED")
+
+    def edit_file_ranges(self, path: str, edits: List[Dict[str, Any]], description: str = "") -> ToolResult:
+        from .range_edits import propose_line_edits
+        try:
+            key = self._read_key(path)
+            expected_sha256 = self._read_snapshots.get(key)
+            self.policy.resolve_write_path(path)
+            if not expected_sha256:
+                raise ToolRuntimeError("READ_REQUIRED", "Hãy đọc các vùng cần sửa bằng read_file trước khi gọi edit_file_ranges.")
+            result = propose_line_edits(self, path, edits, expected_sha256, description)
+            if result.error_code in {"STALE_CONTENT", "NOT_FOUND"}:
+                self.forget_read(path)
+                return ToolResult(False, error="File đã thay đổi. Hãy đọc lại rồi sửa theo số dòng mới.", error_code="STALE_CONTENT")
+            return result
+        except ToolRuntimeError as exc:
+            return ToolResult(False, error=exc.message, error_code=exc.code)
+
+    def inspect_syntax(self, path: str, content: str) -> Dict[str, Any]:
+        from .verifier import validate_syntax
+        report = validate_syntax(path, content)
+        return json.loads(self.redact_text(json.dumps(report, ensure_ascii=False)))
+
+    def syntax_rejection(self, path: str, report: Dict[str, Any]) -> ToolResult:
+        errors = report.get("diagnostics", [])
+        detail = "; ".join(f"dòng {item.get('line', '?')}: {item.get('message', '')}" for item in errors[:3])
+        return ToolResult(False, data={"path": path, "syntax": report,
+            "retry_hint": "Thay đổi chưa được áp dụng. Sửa đề xuất dựa trên lỗi này và file gốc; không cần chạy check_syntax riêng."},
+            error=f"Lỗi cú pháp trong {path}: {detail}", error_code="SYNTAX_ERROR")
+
     def _get_proposal(self, proposal_id: str, expected_kind: Optional[str] = None) -> PendingProposal:
         proposal = self._proposals.get(proposal_id)
         if not proposal:
@@ -394,6 +532,8 @@ class ToolRuntime:
 
     def propose_write_file(self, path: str, content: str, expected_sha256: str = "", description: str = "") -> ToolResult:
         try:
+            if not isinstance(description, str):
+                raise ToolRuntimeError("INVALID_ARGUMENTS", "description phải là chuỗi.")
             if not isinstance(content, str):
                 raise ToolRuntimeError("INVALID_CONTENT", "Nội dung file phải là chuỗi UTF-8.")
             encoded = content.encode("utf-8")
@@ -404,7 +544,10 @@ class ToolRuntime:
             original = ""
             original_hash = ""
             if exists:
-                raw = full_path.read_bytes()
+                with full_path.open("rb") as handle:
+                    raw = handle.read(MAX_EDIT_FILE_BYTES + 1)
+                if len(raw) > MAX_EDIT_FILE_BYTES:
+                    raise ToolRuntimeError("TOO_LARGE", "File vượt giới hạn sửa 8 MB.")
                 if self._is_binary(raw):
                     raise ToolRuntimeError("BINARY", "Không thể ghi đè file nhị phân qua agent.")
                 original_hash = self._sha256_bytes(raw)
@@ -413,6 +556,9 @@ class ToolRuntime:
                     raise ToolRuntimeError("STALE_CONTENT", "File đã thay đổi từ lúc agent đọc; hãy đọc lại trước khi đề xuất sửa.")
             elif expected_sha256:
                 raise ToolRuntimeError("STALE_CONTENT", "File chưa tồn tại nên không thể dùng hash của phiên bản cũ.")
+            syntax = self.inspect_syntax(relative.as_posix(), content)
+            if syntax["status"] == "invalid":
+                return self.syntax_rejection(relative.as_posix(), syntax)
             diff = "".join(difflib.unified_diff(
                 original.splitlines(keepends=True), content.splitlines(keepends=True),
                 fromfile=f"a/{relative.as_posix()}", tofile=f"b/{relative.as_posix()}", lineterm="",
@@ -426,6 +572,7 @@ class ToolRuntime:
                 "description": description.strip(),
                 "operation": "modify" if exists else "create",
                 "diff": diff,
+                "syntax": syntax,
             })
             return ToolResult(True, {
                 "proposal_id": proposal.proposal_id,
@@ -433,6 +580,7 @@ class ToolRuntime:
                 "path": relative.as_posix(),
                 "summary": "Đã tạo đề xuất thay đổi. Chờ người dùng xác nhận trước khi ghi file.",
                 "diff_preview": self.redact_text(diff[:6000]),
+                "syntax": syntax,
             })
         except ToolRuntimeError as exc:
             return ToolResult(False, error=exc.message, error_code=exc.code)
@@ -591,6 +739,7 @@ class ToolRuntime:
                     "new_code": payload["content"],
                     "diff": payload["diff"],
                     "description": payload.get("description", ""),
+                    "syntax": payload.get("syntax", {}),
                 })
             if proposal.kind == "delete":
                 return ToolResult(True, {
@@ -625,6 +774,9 @@ class ToolRuntime:
                 current_hash = self._sha256_bytes(full_path.read_bytes())
             if current_hash != payload["original_sha256"]:
                 raise ToolRuntimeError("STALE_CONTENT", "File đã thay đổi sau khi tạo đề xuất; từ chối ghi đè.")
+            syntax = self.inspect_syntax(relative.as_posix(), payload["content"])
+            if syntax["status"] == "invalid":
+                return self.syntax_rejection(relative.as_posix(), syntax)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             fd, temp_name = tempfile.mkstemp(prefix=".graft-", suffix=".tmp", dir=str(full_path.parent))
             try:
@@ -825,6 +977,13 @@ class ToolRuntime:
             "list_files": lambda: self.list_files(**arguments),
             "search_project": lambda: self.search_project(**arguments),
             "read_file": lambda: self.read_file(**arguments),
+            "find_files": lambda: self.find_files(**arguments),
+            "list_symbols": lambda: self.list_symbols(**arguments),
+            "read_symbol": lambda: self.read_symbol(**arguments),
+            "check_syntax": lambda: self.check_syntax(**arguments),
+            "propose_edit_file": lambda: self.propose_edit_file(**arguments),
+            "edit_file": lambda: self.edit_file(**arguments),
+            "edit_file_ranges": lambda: self.edit_file_ranges(**arguments),
             "propose_write_file": lambda: self.propose_write_file(**arguments),
             "propose_delete_file": lambda: self.propose_delete_file(**arguments),
             "propose_run_command": lambda: self.propose_run_command(**arguments),

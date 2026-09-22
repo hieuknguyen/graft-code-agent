@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 from typing import Any, Dict, Iterable, List, Optional
 
 from .tool_runtime import ToolRuntime
+from .tool_catalog import CODING_TOOL_SCHEMAS
 
 
 from .prompts import GEMINI_SYSTEM_INSTRUCTION as SYSTEM_INSTRUCTION
@@ -21,13 +23,15 @@ from .prompts import GEMINI_SYSTEM_INSTRUCTION as SYSTEM_INSTRUCTION
 class GeminiCodingAgent:
     """Manual Gemini function-call loop compatible with the official google-genai SDK."""
 
+    _EDIT_TOOL_NAMES = frozenset({"edit_file", "edit_file_ranges", "propose_edit_file", "propose_write_file"})
+
     def __init__(self, config: Any, runtime: ToolRuntime):
         self.config = config
         self.runtime = runtime
 
     @staticmethod
     def _tool_schemas() -> List[Dict[str, Any]]:
-        return [
+        return list(CODING_TOOL_SCHEMAS) + [
             {
                 "name": "project_overview",
                 "description": "Get a safe high-level manifest of the imported project before investigating it.",
@@ -129,6 +133,12 @@ class GeminiCodingAgent:
         ]
 
     @staticmethod
+    def _path_key(path: Any) -> Optional[str]:
+        if not isinstance(path, str):
+            return None
+        return os.path.normcase(os.path.normpath(path.strip().replace("\\", "/")))
+
+    @staticmethod
     def _usage(response: Any) -> Dict[str, int]:
         usage = getattr(response, "usage_metadata", None)
         if not usage:
@@ -209,6 +219,10 @@ class GeminiCodingAgent:
             user_parts = [types.Part.from_text(text=prompt)] + self._data_uri_parts(types, images or [])
             contents: List[Any] = [types.Content(role="user", parts=user_parts)]
             proposal_ids: List[str] = []
+            proposed_paths = set()
+            unresolved_syntax: Dict[str, Dict[str, Any]] = {}
+            syntax_warnings: Dict[str, Dict[str, Any]] = {}
+            syntax_retries = 0
             token_totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
             max_rounds = max(1, min(int(getattr(self.config, "gemini_max_tool_rounds", 12)), 24))
 
@@ -224,10 +238,31 @@ class GeminiCodingAgent:
 
                 calls = list(getattr(response, "function_calls", None) or [])
                 if not calls:
+                    if unresolved_syntax:
+                        diagnostics = json.dumps(list(unresolved_syntax.values()), ensure_ascii=False)
+                        if syntax_retries >= 2:
+                            return {
+                                "success": False,
+                                "error": "Đã dừng sau 2 lượt sửa cú pháp tự động; chưa áp dụng đề xuất hoặc chạy lệnh.\n" + diagnostics,
+                                "tokens": token_totals,
+                            }
+                        syntax_retries += 1
+                        contents.append(types.Content(role="model", parts=[types.Part.from_text(
+                            text=self._response_text(response) or "No corrected file proposal was returned.",
+                        )]))
+                        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=(
+                            "=== AUTOMATIC SYNTAX FEEDBACK ===\n" + diagnostics
+                            + "\nThe candidate edits above were rejected and the original files are unchanged. "
+                            "Use editing tools to return corrected proposals based on these diagnostics and the original files. "
+                            "Do not run a separate syntax check, claim completion or run dependent commands. "
+                            f"Syntax repair attempts remaining after this one: {2 - syntax_retries}."
+                        ))]))
+                        continue
                     return {
                         "success": True,
                         "response": self._response_text(response) or "Gemini đã hoàn tất phân tích.",
                         "proposal_ids": proposal_ids,
+                        "syntax_warnings": list(syntax_warnings.values()),
                         "tokens": token_totals,
                     }
 
@@ -241,9 +276,26 @@ class GeminiCodingAgent:
                 for call in calls:
                     name = getattr(call, "name", "")
                     args = dict(getattr(call, "args", None) or {})
-                    tool_result = self.runtime.dispatch(name, args)
+                    if name in self._EDIT_TOOL_NAMES and self._path_key(args.get("path")) in proposed_paths:
+                        tool_result = {
+                            "ok": False, "error_code": "PENDING_EDIT",
+                            "error": "A pending edit already exists for this path. Combine all replacements in one proposal; do not edit an unapplied version.",
+                        }
+                    else:
+                        tool_result = self.runtime.dispatch(name, args)
+                    path = tool_result.get("path")
+                    path_key = self._path_key(path)
+                    if path_key is not None and tool_result.get("error_code") == "SYNTAX_ERROR" and tool_result.get("syntax"):
+                        unresolved_syntax[path_key] = {"path": path, "syntax": tool_result["syntax"]}
                     if tool_result.get("ok") and tool_result.get("proposal_id"):
                         proposal_ids.append(str(tool_result["proposal_id"]))
+                        if path_key is not None:
+                            if name in self._EDIT_TOOL_NAMES:
+                                proposed_paths.add(path_key)
+                            unresolved_syntax.pop(path_key, None)
+                            syntax_warnings.pop(path_key, None)
+                            if tool_result.get("syntax", {}).get("status") == "unavailable":
+                                syntax_warnings[path_key] = {"path": path, "syntax": tool_result["syntax"]}
                     kwargs: Dict[str, Any] = {"name": name, "response": tool_result}
                     call_id = getattr(call, "id", None)
                     if call_id:
@@ -253,6 +305,13 @@ class GeminiCodingAgent:
                 # model function-call content above is preserved verbatim in history.
                 contents.append(types.Content(role="user", parts=function_response_parts))
 
+            if unresolved_syntax:
+                return {
+                    "success": False,
+                    "error": f"Dừng agent sau {max_rounds} lượt vì lỗi cú pháp chưa được sửa; chưa áp dụng đề xuất hoặc chạy lệnh.\n"
+                             + json.dumps(list(unresolved_syntax.values()), ensure_ascii=False),
+                    "tokens": token_totals,
+                }
             return {
                 "success": False,
                 "error": f"Dừng agent sau {max_rounds} lượt tool-call để tránh vòng lặp vô hạn.",

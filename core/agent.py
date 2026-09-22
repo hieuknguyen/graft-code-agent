@@ -1,4 +1,5 @@
 import os
+import json
 import re
 from collections import deque
 from pathlib import Path
@@ -11,13 +12,14 @@ from .gateway_client import GatewayClient
 from .context_builder import GRAFT_SYSTEM_INSTRUCTION, build_graft_prompt, get_system_instruction
 from .verifier import verify_code
 from .gemini_agent import GeminiCodingAgent
-from .tool_runtime import ToolRuntime, ToolRuntimeError
+from .tool_runtime import MAX_EDIT_FILE_BYTES, ToolRuntime, ToolRuntimeError
 from .text_utils import sanitize_latex
 from .prompts import (
     ACTION_REQUEST_INSTRUCTION, ACTION_RECOVERY_INSTRUCTION,
     CONTEXT_FOLLOWUP_INSTRUCTION, TERMINAL_FEEDBACK_INSTRUCTION,
 )
 from .task_intent import is_action_request
+from .gateway_tools import GatewayToolSession, strip_tool_blocks
 
 class GraftAgent:
     def __init__(self, config: AppConfig, root_dir: str):
@@ -33,6 +35,7 @@ class GraftAgent:
 
     def begin_task(self):
         """Keep feedback evidence scoped to the current user request."""
+        self.runtime._read_snapshots.clear()
         self.feedback_progress_revision = 0
         self._task_file_changes: Dict[str, str] = {}
         self._feedback_command_history = deque(maxlen=6)
@@ -67,10 +70,15 @@ class GraftAgent:
         if not result.get("success"):
             return result
 
+        return self._proposals_for_result(result)
+
+    def _proposals_for_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Translate pending runtime proposals for the existing approval UI."""
         actions: List[Dict[str, Any]] = []
         create_files: List[Dict[str, Any]] = []
         delete_files: List[Dict[str, Any]] = []
         commands: List[Dict[str, Any]] = []
+        syntax_warnings = []
         for proposal_id in result.get("proposal_ids", []):
             ui = self.runtime.proposal_for_ui(proposal_id)
             if not ui.ok:
@@ -79,6 +87,9 @@ class GraftAgent:
             kind = proposal.get("kind")
             if kind == "write":
                 valid, verify_msg = verify_code(proposal["file"], proposal["new_code"])
+                syntax = proposal.get("syntax", {})
+                if syntax.get("status") == "unavailable":
+                    syntax_warnings.append({"path": proposal["file"], "syntax": syntax})
                 if proposal.get("operation") == "create":
                     create_files.append({
                         "file": proposal["file"],
@@ -92,7 +103,7 @@ class GraftAgent:
                     actions.append({
                         "file": proposal["file"],
                         "success": valid,
-                        "msg": proposal.get("description") or "Đã chuẩn bị thay đổi từ Gemini; chờ xác nhận để ghi file.",
+                        "msg": proposal.get("description") or "Đã chuẩn bị thay đổi; chờ áp dụng để ghi file.",
                         "diff": proposal["diff"],
                         "original_code": proposal["original_code"],
                         "new_code": proposal["new_code"],
@@ -127,9 +138,50 @@ class GraftAgent:
             "delete_files": delete_files,
             "commands": commands,
             "tokens": result.get("tokens", {}),
+            "syntax_warnings": syntax_warnings,
         }
 
+    def _with_tool_proposals(self, result: Dict[str, Any], session: GatewayToolSession) -> Dict[str, Any]:
+        result["syntax_warnings"] = list(session.syntax_warnings.values())
+        if not session.proposal_ids:
+            return result
+        proposed = self._proposals_for_result({"proposal_ids": session.proposal_ids})
+        pending_paths = {session.path_key(item["file"]) for item in proposed["actions"]}
+        legacy_paths = {session.path_key(item["file"]) for key in ("actions", "create_files", "delete_files") for item in result[key]}
+        if pending_paths & legacy_paths:
+            return {"success": False, "error": "Có nhiều đề xuất chồng lấn trên cùng file; chưa áp dụng thay đổi.", "tokens": result["tokens"]}
+        result["actions"].extend(proposed["actions"])
+        return result
+
+    def _draft_syntax_reports(self, text: str) -> List[Dict[str, Any]]:
+        """Validate legacy action candidates before the model's turn can finish."""
+        actions = self.parse_all_actions(text)
+        if actions["read_files"] or actions["web_search"]:
+            return []  # These drafts still await their source evidence.
+        candidates = [(item["file"], item["code"]) for item in actions["create"]]
+        for action in actions["graft"]:
+            try:
+                path, _ = self.runtime.policy.resolve_read_path(action["file"])
+                original = path.read_text(encoding="utf-8-sig")
+                kind = action["action"]
+                if kind == "ENSURE_IMPORT" and action.get("import"):
+                    candidate = Grafter.ensure_import(original, action["import"])
+                    success = True
+                elif kind == "REPLACE" and action.get("symbol"):
+                    success, candidate, _ = Grafter.graft_replace_symbol(original, action["symbol"], action["code"], parent_class=action.get("parent"), file_path=action["file"])
+                elif kind == "INSERT":
+                    success, candidate, _ = Grafter.graft_insert_symbol(original, action["code"], parent_class=action.get("parent"), file_path=action["file"])
+                else:
+                    continue
+                if success:
+                    candidates.append((action["file"], candidate))
+            except (OSError, ValueError):
+                continue
+        return [{"path": path, "syntax": self.runtime.inspect_syntax(path, content)} for path, content in candidates]
+
     def parse_all_actions(self, ai_text: str) -> Dict[str, List[Dict[str, Any]]]:
+        # Source text inside JSON edit arguments is data, not another action.
+        ai_text = strip_tool_blocks(ai_text)
         graft_actions = []
         create_actions = []
         delete_actions = []
@@ -250,6 +302,7 @@ class GraftAgent:
 
     def clean_ai_response(self, text: str) -> str:
         """Loại bỏ các block raw thẻ lệnh để chat hiển thị markdown thuần đẹp mắt."""
+        text = strip_tool_blocks(text)
         t = re.sub(r'<<<GRAFT_ACTION.*?(?:<<<END_GRAFT(?:_ACTION)?|>>>)', '', text, flags=re.DOTALL | re.IGNORECASE)
         t = re.sub(r'<<<CREATE_FILE.*?<<<END_CREATE_FILE', '', t, flags=re.DOTALL)
         t = re.sub(r'<<<DELETE_FILE.*?<<<END_DELETE_FILE', '', t, flags=re.DOTALL)
@@ -638,11 +691,20 @@ class GraftAgent:
                         resolved = resolved.resolve()
                         rel_path = resolved.relative_to(self.root_dir).as_posix()
                         resolved, _ = self.runtime.policy.resolve_read_path(rel_path)
-                        content = resolved.read_text(encoding="utf-8-sig", errors="replace")
+                        with resolved.open("rb") as handle:
+                            raw = handle.read(MAX_EDIT_FILE_BYTES + 1)
+                        if len(raw) > MAX_EDIT_FILE_BYTES:
+                            raise ValueError("File vượt giới hạn đọc 8 MB; hãy thu hẹp nội dung cần làm việc.")
+                        if self.runtime._is_binary(raw):
+                            raise ValueError("Không hỗ trợ đọc file nhị phân.")
+                        content = raw.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+                        self.runtime.remember_read(rel_path, self.runtime._sha256_bytes(raw))
                         ext = resolved.suffix.lstrip(".") or "text"
+                        syntax = self.runtime.inspect_syntax(rel_path, content)
                         file_results.append(
                             f"File: `{rel_path}` ({len(content.splitlines())} lines):\n"
-                            f"```{ext}\n{content}\n```"
+                            f"```{ext}\n{self.runtime.redact_text(content)}\n```\n"
+                            f"AUTOMATIC SYNTAX DIAGNOSTICS: {json.dumps(syntax, ensure_ascii=False)}"
                         )
                     except Exception as e:
                         file_results.append(f"Could not read `{rf}`: {e}")
@@ -681,6 +743,8 @@ class GraftAgent:
             prompt = expert_notes + web_context + snippets + prompt
         sys_instruction = get_system_instruction(str(self.root_dir))
         ai_res = self.client.query_ai(prompt, system_prompt=sys_instruction, images=images)
+        tool_session = GatewayToolSession(self.runtime, self.client.query_ai, self._draft_syntax_reports)
+        ai_res, prompt = tool_session.resolve(ai_res, prompt, sys_instruction, images)
 
         if not ai_res.get("success"):
             return {
@@ -720,7 +784,7 @@ class GraftAgent:
                 if fallback_query:
                     web_queries.append(fallback_query)
 
-            has_actions = any(all_actions[kind] for kind in ("graft", "create", "delete", "command"))
+            has_actions = bool(tool_session.proposal_ids) or any(all_actions[kind] for kind in ("graft", "create", "delete", "command"))
             if (read_requests or web_queries) and not retrieval_used:
                 retrieval_used = True
                 sections = self._requested_context(read_requests, web_queries)
@@ -735,6 +799,8 @@ class GraftAgent:
                     "\nOne retrieval pass is available: request missing files/searches together if needed."
                 )
             else:
+                if (read_requests or web_queries) and has_actions:
+                    return {"success": False, "error": "Đã hết lượt lấy ngữ cảnh. Chưa thực thi các đề xuất còn chờ đọc file hoặc tìm kiếm.", "tokens": tokens}
                 break
 
             query_prompt += (
@@ -742,16 +808,19 @@ class GraftAgent:
                 + "\n\n".join(sections) + "\n\n" + followup_instruction
             )
             next_result = self.client.query_ai(query_prompt, system_prompt=sys_instruction, images=images)
+            next_result, query_prompt = tool_session.resolve(next_result, query_prompt, sys_instruction, images)
             for key, value in (next_result.get("tokens") or {}).items():
                 if isinstance(value, (int, float)):
                     tokens[key] = tokens.get(key, 0) + value
             if not next_result.get("success") or not next_result.get("response"):
+                if tool_session.rounds or tool_session.syntax_retries or has_actions:
+                    return {"success": False, "error": next_result.get("error") or "Không nhận được phản hồi hợp lệ.", "tokens": tokens}
                 followup_failed = True
                 break
             ai_res = next_result
 
         action_warning = ""
-        if requires_actions and not any(all_actions[kind] for kind in ("graft", "create", "delete", "command")):
+        if requires_actions and not tool_session.proposal_ids and not any(all_actions[kind] for kind in ("graft", "create", "delete", "command")):
             action_warning = (
                 "AI chưa cung cấp thao tác tạo/sửa tệp hoặc chạy lệnh để ứng dụng thực hiện. "
                 "Chưa có hành động nào được thực thi; xem phản hồi bên trên để biết phần còn thiếu."
@@ -809,7 +878,7 @@ class GraftAgent:
                 "action": act
             })
 
-        return {
+        return self._with_tool_proposals({
             "success": True,
             "response": clean_text,
             "raw_response": response_text,
@@ -819,7 +888,7 @@ class GraftAgent:
             "commands": all_actions["command"],
             "tokens": tokens,
             "action_warning": action_warning,
-        }
+        }, tool_session)
 
     def analyze_log_and_plan_next(self, goal: str, last_cmd: str, exit_code: int, log_text: str) -> Dict[str, Any]:
         tail_log = log_text[-4000:] if len(log_text) > 4000 else log_text
@@ -895,6 +964,8 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
 """
         sys_instruction = get_system_instruction(str(self.root_dir))
         ai_res = self.client.query_ai(prompt, system_prompt=sys_instruction)
+        tool_session = GatewayToolSession(self.runtime, self.client.query_ai, self._draft_syntax_reports)
+        ai_res, prompt = tool_session.resolve(ai_res, prompt, sys_instruction)
         if not ai_res.get("success"):
             return {
                 "success": False,
@@ -914,6 +985,7 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
                 + "\n\n".join(sections) + "\n\n" + CONTEXT_FOLLOWUP_INSTRUCTION
             )
             next_result = self.client.query_ai(followup_prompt, system_prompt=sys_instruction)
+            next_result, _ = tool_session.resolve(next_result, followup_prompt, sys_instruction)
             for key, value in (next_result.get("tokens") or {}).items():
                 if isinstance(value, (int, float)):
                     tokens[key] = tokens.get(key, 0) + value
@@ -968,7 +1040,7 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
                     "action": act
                 })
 
-        return {
+        return self._with_tool_proposals({
             "success": True,
             "response": clean_text or response_text,
             "raw_response": response_text,
@@ -977,11 +1049,14 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
             "delete_files": all_actions["delete"],
             "commands": all_actions["command"],
             "tokens": tokens
-        }
+        }, tool_session)
 
     def create_new_file(self, rel_path: str, code: str) -> Tuple[bool, str]:
         fpath = self.root_dir / rel_path
         try:
+            syntax = self.runtime.inspect_syntax(rel_path, code)
+            if syntax["status"] == "invalid":
+                return False, self.runtime.syntax_rejection(rel_path, syntax).error
             fpath.parent.mkdir(parents=True, exist_ok=True)
             existed = fpath.exists()
             previous_bytes = fpath.read_bytes() if existed else None
@@ -1026,7 +1101,32 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
     def apply_action(self, action_result: Dict[str, Any]) -> Tuple[bool, str]:
         fpath = self.root_dir / action_result["file"]
         try:
+            if action_result.get("proposal_id"):
+                # Runtime owns the pending contents and rejects stale snapshots.
+                pending = self.runtime.proposal_for_ui(action_result["proposal_id"])
+                if not pending.ok:
+                    return False, pending.error
+                if pending.data.get("kind") != "write":
+                    return False, "Đề xuất không phải thay đổi file."
+                target, _ = self.runtime.policy.resolve_write_path(pending.data["file"])
+                previous_bytes = target.read_bytes() if target.exists() else None
+                applied = self.runtime.apply_write(action_result["proposal_id"])
+                if not applied.ok:
+                    return False, applied.error
+                data = applied.data
+                self.history_backups.append({
+                    "type": "modify" if data["operation"] == "modify" else "create",
+                    "file": data["path"], "previous_content": data["original_content"],
+                    "previous_bytes": previous_bytes,
+                })
+                if previous_bytes != target.read_bytes():
+                    self._record_file_change(data["path"], "modified" if data["operation"] == "modify" else "created")
+                self.scan()
+                return True, f"Đã lưu thay đổi vào: {data['path']}"
             previous_bytes = fpath.read_bytes() if fpath.exists() else None
+            syntax = self.runtime.inspect_syntax(action_result["file"], action_result["new_code"])
+            if syntax["status"] == "invalid":
+                return False, self.runtime.syntax_rejection(action_result["file"], syntax).error
             self.history_backups.append({
                 "type": "modify",
                 "file": action_result["file"],
@@ -1058,7 +1158,10 @@ Exit code: {exit_code} (0 means process success, not necessarily goal completion
             elif b_type in ("modify", "delete"):
                 fpath.parent.mkdir(parents=True, exist_ok=True)
                 previous_bytes = fpath.read_bytes() if fpath.exists() else None
-                fpath.write_text(backup["previous_content"], encoding="utf-8")
+                if backup.get("previous_bytes") is not None:
+                    fpath.write_bytes(backup["previous_bytes"])
+                else:
+                    fpath.write_text(backup["previous_content"], encoding="utf-8")
                 if previous_bytes != fpath.read_bytes():
                     self._record_file_change(backup["file"], "restored by undo")
                 self.scan()

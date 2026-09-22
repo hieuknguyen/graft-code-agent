@@ -1,5 +1,6 @@
 import os
 import re
+from html import escape
 from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QSplitter,
@@ -87,6 +88,7 @@ class MainWindow(QMainWindow):
         self.editor.chat_view.action_run_command_clicked.connect(self.run_terminal_command)
         self.editor.chat_view.action_create_file_clicked.connect(self.create_file_requested)
         self.editor.chat_view.action_delete_file_clicked.connect(self.delete_file_requested)
+        self.editor.chat_view.action_open_file_clicked.connect(self.on_file_selected)
         self.editor.chat_view.message_persisted.connect(self.on_message_persisted)
         self.editor.chat_view.message_deleted.connect(self.on_message_deleted)
         self.editor.chat_view.messages_cleared.connect(self.on_messages_cleared)
@@ -550,6 +552,17 @@ class MainWindow(QMainWindow):
             self.editor.chat_view.add_system_message("⏹ ĐÃ HỦY YÊU CẦU", "Bạn đã dừng lượt xử lý của AI.")
             self.status.showMessage("Đã hủy yêu cầu AI.")
 
+    def _show_syntax_warnings(self, res: dict):
+        warnings = res.get("syntax_warnings", [])
+        if warnings:
+            details = "<br>".join(
+                f"<code>{escape(item['path'])}</code>: {escape(item['syntax']['summary'])}"
+                for item in warnings
+            )
+            self.editor.chat_view.add_system_message(
+                "⚠ CHƯA KIỂM TRA ĐƯỢC CÚ PHÁP", details, render=False,
+            )
+
     def on_graft_finished(self, res: dict):
         self.prompt.set_busy(False)
         self.prompt.btn_graft.setEnabled(True)
@@ -563,6 +576,7 @@ class MainWindow(QMainWindow):
             self.editor.chat_view.add_system_message("❌ LỖI TỪ AI GATEWAY", err_msg)
             return
 
+        self._show_syntax_warnings(res)
         actions = res.get("actions", [])
         create_files = res.get("create_files", [])
         delete_files = res.get("delete_files", [])
@@ -575,8 +589,9 @@ class MainWindow(QMainWindow):
         is_auto = self.config.auto_apply or self.prompt.chk_auto.isChecked()
 
         # TỰ ĐỘNG THỰC HIỆN NGAY LẬP TỨC (nếu bật Tự động áp dụng)
+        has_changes = False
+        apply_failed = False
         if is_auto:
-            has_changes = False
             if create_files:
                 for cf in create_files:
                     succ, msg = self.agent.create_new_file(cf["file"], cf["code"])
@@ -584,14 +599,23 @@ class MainWindow(QMainWindow):
                         self.editor.chat_view.add_system_message("📝 TỰ ĐỘNG TẠO FILE", f"Đã tạo file mới: <code>{cf['file']}</code><br><a href='open_file:{cf['file']}'>Mở xem file</a>", render=False)
                         self.prompt.btn_undo.setEnabled(True)
                         has_changes = True
+                    else:
+                        apply_failed = True
+                        self.editor.chat_view.add_system_message("❌ KHÔNG THỂ TẠO FILE", msg, render=False)
 
             if actions:
                 for act in actions:
                     if act.get("success"):
-                        self.agent.apply_action(act)
-                        self.editor.chat_view.add_system_message("💾 TỰ ĐỘNG CẤY GHÉP", f"Đã cập nhật sửa file: <code>{act['file']}</code>", render=False)
-                        self.prompt.btn_undo.setEnabled(True)
-                        has_changes = True
+                        succ, msg = self.agent.apply_action(act)
+                        if succ:
+                            self.editor.chat_view.add_system_message("💾 TỰ ĐỘNG CẤY GHÉP", f"Đã cập nhật sửa file: <code>{act['file']}</code>", render=False)
+                            self.prompt.btn_undo.setEnabled(True)
+                            has_changes = True
+                        else:
+                            apply_failed = True
+                            self.editor.chat_view.add_system_message("❌ KHÔNG THỂ ÁP DỤNG THAY ĐỔI", msg, render=False)
+                    else:
+                        apply_failed = True
 
             if has_changes:
                 self.update_codebase_views()
@@ -603,8 +627,16 @@ class MainWindow(QMainWindow):
             delete_files=delete_files,
             commands=commands,
             tokens=tokens,
-            auto_applied=is_auto and bool(actions or create_files)
+            auto_applied=is_auto and has_changes and not apply_failed
         )
+
+        if is_auto and apply_failed:
+            self._cancel_automatic_followup()
+            self.editor.chat_view.add_system_message(
+                "⏹ CHƯA ÁP DỤNG ĐỦ THAY ĐỔI",
+                "Đã dừng các lệnh phụ thuộc vì có thay đổi chưa lưu được. Hãy xem lỗi ở trên.",
+            )
+            return
 
         if actions and not is_auto:
             first_act = actions[0]
@@ -895,6 +927,7 @@ class MainWindow(QMainWindow):
             self.editor.chat_view.add_system_message("❌ LỖI PHÂN TÍCH LOG", res.get("error", ""))
             return
 
+        self._show_syntax_warnings(res)
         ai_response = res.get("response", "")
         commands = res.get("commands", [])
         actions = res.get("actions", [])
@@ -904,6 +937,7 @@ class MainWindow(QMainWindow):
 
         progress_before = self.agent.feedback_progress_revision
         has_changes = False
+        apply_failed = False
         if actions:
             for act in actions:
                 if act.get("success"):
@@ -913,7 +947,10 @@ class MainWindow(QMainWindow):
                         self.prompt.btn_undo.setEnabled(True)
                         has_changes = True
                     else:
+                        apply_failed = True
                         self.editor.chat_view.add_system_message("❌ KHÔNG THỂ ÁP DỤNG THAY ĐỔI", msg, render=False)
+                else:
+                    apply_failed = True
 
         if create_files:
             for cf in create_files:
@@ -922,6 +959,9 @@ class MainWindow(QMainWindow):
                     self.editor.chat_view.add_system_message("📝 TỰ ĐỘNG TẠO FILE", f"Đã tạo file mới: <code>{cf['file']}</code>", render=False)
                     self.prompt.btn_undo.setEnabled(True)
                     has_changes = True
+                else:
+                    apply_failed = True
+                    self.editor.chat_view.add_system_message("❌ KHÔNG THỂ TẠO FILE", msg, render=False)
 
         if has_changes:
             self.update_codebase_views()
@@ -933,8 +973,16 @@ class MainWindow(QMainWindow):
             delete_files=delete_files,
             commands=commands,
             tokens=tokens,
-            auto_applied=self.agent.feedback_progress_revision != progress_before,
+            auto_applied=self.agent.feedback_progress_revision != progress_before and not apply_failed,
         )
+
+        if apply_failed:
+            self._cancel_automatic_followup()
+            self.editor.chat_view.add_system_message(
+                "⏹ CHƯA ÁP DỤNG ĐỦ THAY ĐỔI",
+                "Đã dừng các lệnh phụ thuộc vì có thay đổi chưa lưu được. Hãy xem lỗi ở trên.",
+            )
+            return
 
         if commands:
             self.command_queue = [c["command"] for c in commands]
